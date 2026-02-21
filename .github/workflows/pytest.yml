@@ -1,0 +1,36 @@
+name: Run Pytest and Codecov with Hatch
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build --target hatch -t shell:hatch .
+
+      - name: Run pytest and generate coverage report
+        run: docker run --rm -e HATCH_ENV=test -v "${{ github.workspace }}:/app" shell:hatch cov
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: ${{ github.workspace }}/coverage.xml
+
+      - name: Upload coverage report to Codecov
+        if: ${{ secrets.CODECOV_TOKEN != '' }}
+        uses: codecov/codecov-action@v4
+        with:
+          fail_ci_if_error: true
+          files: ${{ github.workspace }}/coverage.xml
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Skip Codecov upload (no token)
+        if: ${{ secrets.CODECOV_TOKEN == '' }}
+        run: echo "Skipping Codecov — CODECOV_TOKEN not set."

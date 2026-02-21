@@ -1,0 +1,151 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "shell"
+dynamic = ["version"]
+description = "SHELL Highlights Epithelium and Lumen Locations — whole-slide H&E segmentation"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = "MIT"
+keywords = [
+    "histopathology",
+    "segmentation",
+    "whole-slide-image",
+    "H&E",
+    "deep-learning",
+]
+authors = [{ name = "barrettMCW", email = "mjbarrett@mcw.edu" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "torch",
+    "monai",
+    "pyvips",
+    "openslide-python",
+    "macenko-pca",
+]
+
+[project.optional-dependencies]
+omero = ["omero-py", "zeroc-ice"]
+
+[project.scripts]
+shell = "shell.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/laviolette-lab/shell#readme"
+Issues = "https://github.com/laviolette-lab/shell/issues"
+Source = "https://github.com/laviolette-lab/shell"
+
+[tool.hatch.version]
+path = "src/shell/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shell"]
+
+[tool.hatch.env]
+requires = ["hatch-pip-compile"]
+
+[tool.hatch.envs.default]
+type = "pip-compile"
+pip-compile-hashes = true
+dependencies = []
+
+[tool.hatch.envs.default.scripts]
+build = "hatch build && chmod -R 777 dist/*"
+
+[tool.hatch.envs.test]
+dependencies = ["pytest", "pytest-cov", "coverage[toml]>=6.2"]
+[tool.hatch.envs.test.scripts]
+test = "pytest {args:tests}"
+cov = "pytest --cov=src --cov-report=term-missing --cov-report=xml {args:tests}"
+
+[tool.hatch.envs.lint]
+dependencies = ["ruff>=0.4.0"]
+[tool.hatch.envs.lint.scripts]
+check = "ruff check src tests"
+format = "ruff format src tests"
+format-check = "ruff format src tests --check"
+fix = "ruff check --fix src tests"
+all = ["format", "fix", "check"]
+
+[tool.hatch.envs.types]
+dependencies = ["mypy>=1.0.0"]
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args:src/shell tests}"
+
+[tool.hatch.envs.docs]
+dependencies = [
+    "mkdocs",
+    "mkdocstrings[python]",
+    "mkdocs-material",
+    "mkdocs-autorefs",
+    "mkdocs-minify-plugin",
+    "mkdocs-material-extensions",
+    "mkdocs-git-revision-date-localized-plugin",
+]
+[tool.hatch.envs.docs.scripts]
+build-docs = "mkdocs build"
+serve-docs = "mkdocs serve"
+
+[[tool.hatch.envs.all.matrix]]
+python = ["3.10", "3.11", "3.12"]
+
+[tool.coverage.run]
+source_pkgs = ["shell", "tests"]
+branch = true
+parallel = true
+omit = ["src/shell/__about__.py"]
+
+[tool.coverage.paths]
+shell = ["src/shell", "*/shell/src/shell"]
+tests = ["tests", "*/shell/tests"]
+
+[tool.coverage.report]
+exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "F",   # pyflakes
+    "E",
+    "W",   # pycodestyle
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "A",   # flake8-builtins
+    "C4",  # flake8-comprehensions
+    "DTZ", # flake8-datetimez
+    "T20", # flake8-print (catches stray prints in library code)
+    "RUF", # ruff-specific rules
+]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["T20"]
+"src/shell/cli.py" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["shell"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+xfail_strict = true

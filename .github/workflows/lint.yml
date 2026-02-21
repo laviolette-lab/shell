@@ -1,0 +1,19 @@
+name: Lint and Format with Ruff
+
+on:
+  push:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  lint-and-format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build --target hatch -t shell:hatch .
+      - name: Check formatting with Ruff
+        run: docker run --rm -e HATCH_ENV=lint -v "${{ github.workspace }}:/app" shell:hatch format-check
+      - name: Run Ruff linter
+        run: docker run --rm -e HATCH_ENV=lint -v "${{ github.workspace }}:/app" shell:hatch check

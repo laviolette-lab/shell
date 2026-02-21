@@ -1,0 +1,38 @@
+{
+    "name": "SHELL Dev",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": "..",
+        "target": "dev"
+    },
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "python.defaultInterpreterPath": "/usr/bin/python3",
+                "autoDocstring.docstringFormat": "sphinx",
+                "[python]": {
+                    "editor.defaultFormatter": "charliermarsh.ruff",
+                    "editor.formatOnSave": true,
+                    "editor.codeActionsOnSave": {
+                        "source.fixAll.ruff": "explicit",
+                        "source.organizeImports.ruff": "explicit"
+                    }
+                }
+            },
+            "extensions": [
+                "ms-toolsai.jupyter",
+                "ms-python.python",
+                "charliermarsh.ruff",
+                "ms-python.mypy-type-checker",
+                "editorconfig.editorconfig",
+                "njpwerner.autodocstring",
+                "usernamehw.errorlens",
+                "Gruntfuggly.todo-tree",
+                "eamodio.gitlens",
+                "github.vscode-github-actions"
+            ]
+        }
+    },
+    "remoteUser": "vscode"
+}
