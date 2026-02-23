@@ -162,6 +162,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Side length (output pixels) of each processing tile. Default 2048.",
     )
     omero_p.add_argument(
+        "--tile-overlap",
+        type=int,
+        default=128,
+        help=(
+            "Overlap in output pixels between adjacent OMERO tiles. "
+            "Each pixel in the overlap zone is fetched only once (the "
+            "producer caches EHO border strips). Centre-cropping removes "
+            "the seam. Set to 0 to disable. Default 128."
+        ),
+    )
+    omero_p.add_argument(
+        "--sw-overlap",
+        type=float,
+        default=0.25,
+        help=(
+            "Fractional overlap for the MONAI sliding-window inference "
+            "within each tile (0-1). Higher values improve patch-boundary "
+            "quality at the cost of more forward passes. Default 0.25."
+        ),
+    )
+    omero_p.add_argument(
         "--num-bg-tiles",
         type=int,
         default=4,
@@ -273,6 +294,8 @@ def main(argv: list[str] | None = None) -> int:
             no_tissue_crop=args.no_tissue_crop,
             device=args.device,
             inference_tile_size=args.inference_tile_size,
+            tile_overlap=args.tile_overlap,
+            sw_overlap=args.sw_overlap,
             num_bg_tiles=args.num_bg_tiles,
             min_thumb_size=args.min_thumb_size,
             min_tissue_frac=args.min_tissue_frac,

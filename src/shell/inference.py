@@ -21,6 +21,7 @@ from torch.amp import autocast
 # ---------------------------------------------------------------------------
 VAL_ROI_SIZE: tuple[int, int] = (512, 512)
 VAL_SW_BATCH: int = 16
+VAL_SW_OVERLAP: float = 0.25
 MAX_DIM: int = 8192
 
 
@@ -32,7 +33,7 @@ def run_inference(
     roi_size: tuple[int, int] = VAL_ROI_SIZE,
     sw_batch_size: int = VAL_SW_BATCH,
     max_dim: int = MAX_DIM,
-    overlap: float = 0.0,
+    overlap: float = VAL_SW_OVERLAP,
 ) -> np.ndarray:
     """Run sliding-window inference on an EHO (H, W, 3) uint8 image.
 
@@ -43,6 +44,9 @@ def run_inference(
     :param sw_batch_size: number of patches per forward pass.
     :param max_dim: maximum spatial dimension (centre-crop if exceeded).
     :param overlap: fraction of overlap between sliding-window patches.
+        Values > 0 enable Gaussian importance weighting so that
+        overlapping patch centres contribute more than edges, which
+        eliminates the grid artefacts visible with ``mode="constant"``.
     :return: (H, W) uint8 label map.
     """
     if isinstance(device, str):
@@ -84,6 +88,10 @@ def run_inference(
             message="Using a non-tuple sequence for multidimensional indexing",
             category=UserWarning,
         )
+        # Use Gaussian importance weighting when patches overlap so that
+        # each patch's centre is trusted more than its edges.  With
+        # overlap=0 fall back to uniform ("constant") weighting.
+        blend_mode = "gaussian" if overlap > 0 else "constant"
         logits = sliding_window_inference(
             img_t,
             roi_size,
@@ -92,7 +100,7 @@ def run_inference(
             overlap=overlap,
             sw_device=device,
             device=torch.device("cpu"),
-            mode="constant",
+            mode=blend_mode,
         )
     del img_t
 
