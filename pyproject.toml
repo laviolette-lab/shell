@@ -59,7 +59,7 @@ requires = ["hatch-pip-compile"]
 [tool.hatch.envs.default]
 type = "pip-compile"
 pip-compile-hashes = true
-dependencies = []
+dependencies = ["setuptools==82.0.0"]
 
 [tool.hatch.envs.default.scripts]
 build = "hatch build && chmod -R 777 dist/*"
