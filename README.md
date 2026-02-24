@@ -3,8 +3,8 @@
 [![Build](https://github.com/laviolette-lab/shell/actions/workflows/build.yml/badge.svg)](https://github.com/laviolette-lab/shell/actions/workflows/build.yml)
 [![Tests](https://github.com/laviolette-lab/shell/actions/workflows/pytest.yml/badge.svg)](https://github.com/laviolette-lab/shell/actions/workflows/pytest.yml)
 [![Lint](https://github.com/laviolette-lab/shell/actions/workflows/lint.yml/badge.svg)](https://github.com/laviolette-lab/shell/actions/workflows/lint.yml)
-[![PyPI - Version](https://img.shields.io/pypi/v/shell.svg)](https://pypi.org/project/shell)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/shell.svg)](https://pypi.org/project/shell)
+[![PyPI - Version](https://img.shields.io/pypi/v/lavlab-shell.svg)](https://pypi.org/project/lavlab-shell)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/lavlab-shell.svg)](https://pypi.org/project/lavlab-shell)
 
 -----
 
