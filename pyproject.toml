@@ -54,18 +54,13 @@ path = "src/shell/__about__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/shell"]
 
-[tool.hatch.env]
-requires = ["hatch-uv"]
-
 [tool.hatch.envs.default]
-type = "uv"
 dependencies = ["setuptools>=82.0.0"]
 
 [tool.hatch.envs.default.scripts]
 build = "hatch build && chmod -R 777 dist/*"
 
 [tool.hatch.envs.test]
-type = "uv"
 dependencies = [
     "pytest",
     "pytest-cov",
@@ -77,7 +72,6 @@ test = "pytest {args:tests}"
 cov = "pytest --cov=src --cov-report=term-missing --cov-report=xml {args:tests}"
 
 [tool.hatch.envs.lint]
-type = "uv"
 dependencies = ["ruff>=0.4.0", "setuptools>=82.0.0"]
 [tool.hatch.envs.lint.scripts]
 check = "ruff check src tests"
@@ -87,13 +81,11 @@ fix = "ruff check --fix src tests"
 all = ["format", "fix", "check"]
 
 [tool.hatch.envs.types]
-type = "uv"
 dependencies = ["mypy>=1.0.0", "setuptools>=82.0.0"]
 [tool.hatch.envs.types.scripts]
 check = "mypy --install-types --non-interactive {args:src/shell tests}"
 
 [tool.hatch.envs.docs]
-type = "uv"
 dependencies = [
     "mkdocs",
     "mkdocstrings[python]",

@@ -24,9 +24,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          # Ensure a compatible virtualenv and the hatch uv plugin are available
-          python -m pip install virtualenv==20.17.1 hatch hatch-uv
+          python -m pip install --upgrade pip setuptools wheel hatch
 
       - name: Build wheel and sdist
         run: hatch build
