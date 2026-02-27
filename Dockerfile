@@ -22,7 +22,7 @@ COPY src/ src/
 RUN chown -R vscode:vscode /app
 
 FROM base AS hatch
-RUN pip3 install --no-cache-dir hatch uv
+RUN pip3 install --no-cache-dir hatch hatch-uv
 ENV HATCH_ENV=default
 ENTRYPOINT ["hatch", "run"]
 
@@ -32,7 +32,7 @@ COPY requirements.txt ./
 COPY tests/ tests/
 COPY docs/ docs/
 COPY mkdocs.yml ./
-RUN pip3 install --no-cache-dir hatch \
+RUN pip3 install --no-cache-dir hatch hatch-uv \
     && hatch build \
     && pip3 install --no-cache-dir $(find /app -name 'requirement*.txt' -exec echo -n '-r {} ' \;)
 USER vscode
