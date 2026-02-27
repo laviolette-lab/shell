@@ -55,31 +55,30 @@ path = "src/shell/__about__.py"
 packages = ["src/shell"]
 
 [tool.hatch.env]
-requires = ["hatch-pip-compile"]
+requires = ["hatch-uv"]
 
 [tool.hatch.envs.default]
-type = "pip-compile"
-pip-compile-resolver = "uv"
-pip-compile-hashes = false
-pip-compile-args = ["--allow-unsafe", "--universal"]
-dependencies = ["setuptools==82.0.0"]
+type = "uv"
+dependencies = ["setuptools>=82.0.0"]
 
 [tool.hatch.envs.default.scripts]
 build = "hatch build && chmod -R 777 dist/*"
 
 [tool.hatch.envs.test]
+type = "uv"
 dependencies = [
     "pytest",
     "pytest-cov",
     "coverage[toml]>=6.2",
-    "setuptools==82.0.0",
+    "setuptools>=82.0.0",
 ]
 [tool.hatch.envs.test.scripts]
 test = "pytest {args:tests}"
 cov = "pytest --cov=src --cov-report=term-missing --cov-report=xml {args:tests}"
 
 [tool.hatch.envs.lint]
-dependencies = ["ruff>=0.4.0", "setuptools==82.0.0"]
+type = "uv"
+dependencies = ["ruff>=0.4.0", "setuptools>=82.0.0"]
 [tool.hatch.envs.lint.scripts]
 check = "ruff check src tests"
 format = "ruff format src tests"
@@ -88,11 +87,13 @@ fix = "ruff check --fix src tests"
 all = ["format", "fix", "check"]
 
 [tool.hatch.envs.types]
-dependencies = ["mypy>=1.0.0", "setuptools==82.0.0"]
+type = "uv"
+dependencies = ["mypy>=1.0.0", "setuptools>=82.0.0"]
 [tool.hatch.envs.types.scripts]
 check = "mypy --install-types --non-interactive {args:src/shell tests}"
 
 [tool.hatch.envs.docs]
+type = "uv"
 dependencies = [
     "mkdocs",
     "mkdocstrings[python]",
@@ -101,7 +102,7 @@ dependencies = [
     "mkdocs-minify-plugin",
     "mkdocs-material-extensions",
     "mkdocs-git-revision-date-localized-plugin",
-    "setuptools==82.0.0",
+    "setuptools>=82.0.0",
 ]
 [tool.hatch.envs.docs.scripts]
 build-docs = "mkdocs build"
