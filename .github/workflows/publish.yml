@@ -24,7 +24,7 @@ jobs:
 
       - name: Install build tools
         run: |
-          python -m pip install --upgrade pip setuptools wheel hatch virtualenv
+          python -m pip install --upgrade pip setuptools wheel hatch virtualenv==20.17.1
 
       - name: Build wheel and sdist
         run: hatch build
