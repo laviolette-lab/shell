@@ -1689,6 +1689,7 @@ def infer_omero_wsi(
             save_eho=save_eho,
             output_path=output_path,
             tile_overlap=tile_overlap,
+            roi_size=inference_tile_size,
             sw_overlap=sw_overlap,
             num_fetch_workers=num_fetch_workers,
         )
@@ -1736,6 +1737,7 @@ def _run_pipeline(
     save_eho: str | None,
     output_path: str,
     tile_overlap: int,
+    roi_size: int,
     sw_overlap: float,
     num_fetch_workers: int = 4,
 ) -> np.ndarray:
@@ -1842,6 +1844,7 @@ def _run_pipeline(
                 tile_eho,
                 model,
                 device,
+                roi_size=(roi_size, roi_size),
                 overlap=sw_overlap,
             )
             del tile_eho

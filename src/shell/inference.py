@@ -40,7 +40,7 @@ from torch.amp import autocast
 # ---------------------------------------------------------------------------
 # Default inference parameters
 # ---------------------------------------------------------------------------
-VAL_ROI_SIZE: tuple[int, int] = (512, 512)
+VAL_ROI_SIZE: tuple[int, int] = (2048, 2048)
 VAL_SW_BATCH: int = 16
 VAL_SW_OVERLAP: float = 0.25
 
