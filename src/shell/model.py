@@ -147,7 +147,7 @@ def build_model(
         in_channels=3,
         out_channels=num_classes,
         dropout_prob=0.1,
-        norm=("GROUP", {"num_groups": 4}),
+        norm=("GROUP", {"num_groups": 8}),
         act=("RELU", {"inplace": True}),
         input_image_size=tile_size,
         vae_nz=256,
