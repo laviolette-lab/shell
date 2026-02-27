@@ -213,7 +213,7 @@ def preprocess_wsi(
     target_mpp: float = TARGET_MPP,
     mpp: float | None = None,
     stain_downsample: int = 4,
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Read a raw RGB image, scale to *target_mpp*, and produce an EHO image.
 
     :param image_path: path to an RGB image (TIFF, PNG, JPEG, etc.).
@@ -223,7 +223,7 @@ def preprocess_wsi(
         unavailable (e.g. plain PNG) a warning is emitted and scaling is
         skipped (the image is assumed to already be at *target_mpp*).
     :param stain_downsample: downsample factor for stain parameter estimation.
-    :return: (H, W, 3) uint8 EHO image.
+    :return: tuple of (H, W, 3) uint8 EHO image and (H, W) bool tissue mask.
     """
     # 1. Determine MPP
     if mpp is not None:
@@ -277,12 +277,17 @@ def preprocess_wsi(
     del rgb_small, bg_small
     gc.collect()
 
+    # 4b. Build tissue mask from the background mask at full resolution
+    bg_full = detect_background(image_np)
+    tissue_mask = ~bg_full
+    del bg_full
+
     # 5. Apply EHO colour transform (chunked)
     eho = apply_eho_chunked(image_np, **sp)
     del image_np, sp
     gc.collect()
 
-    return eho
+    return eho, tissue_mask
 
 
 def infer_wsi(
@@ -324,7 +329,7 @@ def infer_wsi(
             device = "cpu"
 
     # 1. Preprocess
-    eho = preprocess_wsi(
+    eho, tissue_mask = preprocess_wsi(
         input_path,
         target_mpp=target_mpp,
         mpp=mpp,
@@ -337,8 +342,13 @@ def infer_wsi(
 
     # 2. Load model + inference
     model = build_model(model_path, device, model_version=model_version)
-    label_map = run_inference(eho, model, device)
-    del eho, model
+    label_map = run_inference(
+        eho,
+        model,
+        device,
+        tissue_mask=tissue_mask,
+    )
+    del eho, model, tissue_mask
     gc.collect()
 
     # 3. Always return/save at original input resolution.

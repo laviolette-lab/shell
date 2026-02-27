@@ -32,7 +32,7 @@ PIL.Image.MAX_IMAGE_PIXELS = None  # disable DecompressionBombError for large WS
 # Default hyper-parameters (keep in sync with train.ipynb)
 # ---------------------------------------------------------------------------
 NUM_CLASSES: int = 3
-TILE_SIZE: tuple[int, int] = (384, 384)
+TILE_SIZE: tuple[int, int] = (320, 320)
 CLASS_NAMES: dict[int, str] = {0: "Background", 1: "Epithelium", 2: "Stroma"}
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,6 @@ CLASS_NAMES: dict[int, str] = {0: "Background", 1: "Epithelium", 2: "Stroma"}
 #: entry here.
 MODEL_REGISTRY: dict[str, str] = {
     "v1": "model_v1.pth",
-    # "v2": "model_v2.pth",  # ← future upgrade: add file + entry
 }
 
 #: The version tag used when no explicit model path is provided.
@@ -147,8 +146,9 @@ def build_model(
         init_filters=16,
         in_channels=3,
         out_channels=num_classes,
-        dropout_prob=0.2,
-        norm=("GROUP", {"num_groups": 8}),
+        dropout_prob=0.1,
+        norm=("GROUP", {"num_groups": 4}),
+        act=("RELU", {"inplace": True}),
         input_image_size=tile_size,
         vae_nz=256,
         vae_estimate_std=True,
