@@ -523,10 +523,21 @@ def ensure_inner_border(
 
 
 def _equalise_hematoxylin(channel: np.ndarray) -> np.ndarray:
-    """Histogram-equalise a single-channel image (float or uint8)."""
+    """Histogram-equalise a single-channel image (float or uint8).
+
+    Masks out exact-zero pixels so that background padding (from tiled
+    pipelines or all-white glass regions) does not shift the histogram
+    and consume the lowest bins.
+    """
     if channel.dtype.kind == "f":
         u8 = skimage.util.img_as_ubyte(np.clip(channel, 0, 1))
+        mask = u8 > 0
+        if mask.any():
+            return skimage.exposure.equalize_hist(u8, mask=mask)
         return skimage.exposure.equalize_hist(u8)
+    mask = channel > 0
+    if mask.any():
+        return skimage.exposure.equalize_hist(channel, mask=mask)
     return skimage.exposure.equalize_hist(channel)
 
 
@@ -535,6 +546,7 @@ def segment_nuclei(
     outer_mask: np.ndarray,
     inner_mask: np.ndarray | None = None,
     threshold: float = 0.03,
+    tissue_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Segment nuclei from the hematoxylin channel.
 
@@ -555,6 +567,11 @@ def segment_nuclei(
     threshold:
         Equalised-intensity threshold — pixels *below* this are nuclei.
         Default 0.03.
+    tissue_mask:
+        If provided, "other nuclei" are restricted to tissue regions.
+        This prevents spurious detections in background/glass areas
+        where the hematoxylin channel may be zero (e.g. from tiled
+        pipelines that skip non-tissue tiles).
     """
     eq = _equalise_hematoxylin(hematoxylin_channel)
     nuclei = eq < threshold
@@ -566,6 +583,9 @@ def segment_nuclei(
     if inner_mask is not None:
         exclude = exclude | inner_mask.astype(bool)
     other = nuclei & ~exclude
+
+    if tissue_mask is not None:
+        other = other & tissue_mask.astype(bool)
 
     return epithelial, other
 
@@ -698,6 +718,7 @@ def post_process(
         outer,
         inner,
         nuclei_threshold,
+        tissue,
     )
 
     mask_set = MaskSet(
