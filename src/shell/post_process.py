@@ -115,7 +115,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import numpy as np
 import scipy.ndimage
@@ -1036,7 +1036,7 @@ def segment_nuclei(
     hematoxylin_channel: np.ndarray,
     outer_mask: np.ndarray,
     inner_mask: np.ndarray | None = None,
-    threshold: float = 0.03,
+    threshold: float = 0.01,
     tissue_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Segment nuclei from the hematoxylin channel.
@@ -1057,7 +1057,7 @@ def segment_nuclei(
         from *other_nuclei* (they are not stromal).
     threshold:
         Equalised-intensity threshold — pixels *below* this are nuclei.
-        Default 0.03.
+        Default 0.01.
     tissue_mask:
         If provided, "other nuclei" are restricted to tissue regions.
         This prevents spurious detections in background/glass areas
@@ -1168,12 +1168,14 @@ def assign_labels(masks: MaskSet, shape: tuple[int, int]) -> np.ndarray:
 def post_process(
     inner_pred: np.ndarray,
     outer_pred: np.ndarray,
-    tissue_mask: np.ndarray,
+    tissue_mask: np.ndarray | None,
     hematoxylin_channel: np.ndarray,
     *,
+    mode: Literal["wsi", "biopsy", "tile"] = "wsi",
     profile_name: str = "best_effort",
-    nuclei_threshold: float = 0.03,
+    nuclei_threshold: float = 0.01,
     inner_border_px: int = 2,
+    tile_pad: int | None = None,
     verbose: bool = True,
     return_timings: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, float]]:
@@ -1185,15 +1187,43 @@ def post_process(
         Raw binary predictions from the segmentation model (H, W) bool/uint8.
     tissue_mask:
         Tissue mask from preprocessing (H, W) bool.  White pixels in the
-        label map are derived as ``~tissue_mask``.
+        label map are derived as ``~tissue_mask``.  Required for
+        ``mode='wsi'`` and ``mode='biopsy'``; pass ``None`` (or omit) for
+        ``mode='tile'``.
     hematoxylin_channel:
         EHO ch1 (hematoxylin) for nuclei segmentation, uint8 or float.
+    mode:
+        Processing mode that controls which pipeline stages run:
+
+        ``'wsi'`` *(default)*
+            Full whole-slide pipeline.  Tissue mask is used to restrict
+            predictions, and the central urethra component is detected and
+            labelled separately.
+
+        ``'biopsy'``
+            Same as ``'wsi'`` but without urethra detection.  Suitable for
+            needle-biopsy cores where no urethra is present.
+
+        ``'tile'``
+            Single-tile pipeline.  No tissue mask is used and no urethra is
+            detected.  The inner/outer predictions and hematoxylin channel
+            are reflect-padded by *tile_pad* pixels before morphological
+            operations so that holes and structures touching the tile edge
+            are handled correctly; the padding is stripped from all outputs
+            before the final label map is assembled.
     profile_name:
         One of ``"best_effort"``, ``"precise"``, ``"sensitive"``.
     nuclei_threshold:
         Threshold for nuclei detection (lower = more conservative).
     inner_border_px:
         Pixels to erode from combined → assign to outer as border ring.
+    tile_pad:
+        Reflect-padding (pixels) applied on every side in ``mode='tile'``.
+        When ``None`` (default), automatically set to 50 % of the shorter
+        spatial dimension of *inner_pred*, i.e.
+        ``min(inner_pred.shape) // 2``.  This simulates up to a full gland
+        worth of surrounding context on every edge.  Pass an explicit
+        integer to override.
     verbose:
         Print per-stage timings to stdout.
     return_timings:
@@ -1217,20 +1247,57 @@ def post_process(
             print(f"  {name}: {elapsed:.2f}s")
         return result
 
+    if mode not in ("wsi", "biopsy", "tile"):
+        raise ValueError(f"mode must be 'wsi', 'biopsy', or 'tile'; got {mode!r}")
+
+    # Resolve tile_pad: default to 50 % of the shorter spatial dimension
+    # so that up to one full gland-width of context is reflected on every edge.
+    if tile_pad is None:
+        tile_pad = min(inner_pred.shape[0], inner_pred.shape[1]) // 2
+
     if verbose:
         print(
-            f"post_process — profile={profile_name}  "
+            f"post_process — mode={mode}  profile={profile_name}  "
             f"nuclei_thr={nuclei_threshold}  border={inner_border_px}px"
         )
 
-    inner, outer, tissue = _run(
-        "restrict_to_tissue",
-        restrict_predictions_to_tissue,
-        inner_pred,
-        outer_pred,
-        tissue_mask,
-    )
-    urethra = _run("detect_urethra", detect_urethra, inner, outer)
+    # ── Stage 1: Tissue restriction / tile padding ───────────────────────
+    if mode == "tile":
+        # Reflect-pad all spatial inputs to simulate surrounding tissue.
+        # This prevents morphological operations (hole-fill, small-object
+        # removal, filter dilation) from being misled by the hard image
+        # boundary.  All outputs are cropped back to the original size
+        # after nuclei segmentation.
+        p = tile_pad
+        inner: np.ndarray = np.pad(inner_pred.astype(bool), p, mode="reflect")
+        outer: np.ndarray = np.pad(outer_pred.astype(bool), p, mode="reflect")
+        hema_work: np.ndarray = np.pad(hematoxylin_channel, p, mode="reflect")
+        # Treat the entire padded region as tissue so downstream steps
+        # never filter on tissue membership.
+        tissue: np.ndarray = np.ones(inner.shape, dtype=bool)
+    else:
+        if tissue_mask is None:
+            raise ValueError(
+                "tissue_mask is required for mode='wsi' and mode='biopsy'. "
+                "Use mode='tile' for single-tile inference without a tissue mask."
+            )
+        inner, outer, tissue = _run(
+            "restrict_to_tissue",
+            restrict_predictions_to_tissue,
+            inner_pred,
+            outer_pred,
+            tissue_mask,
+        )
+        hema_work = hematoxylin_channel
+
+    # ── Stage 2: Urethra detection (WSI only) ────────────────────────────
+    if mode == "wsi":
+        urethra = _run("detect_urethra", detect_urethra, inner, outer)
+    else:
+        # Biopsy and tile modes: no urethra present.
+        urethra = None
+
+    # ── Stages 3–8: Morphological cleaning and nuclei segmentation ───────
     inner, outer = _run("clean_small_holes", clean_small_holes, inner, outer)
 
     # apply_filters never mutates its inputs — no need to copy.
@@ -1244,12 +1311,21 @@ def post_process(
     epi_nuclei, other_nuclei = _run(
         "segment_nuclei",
         segment_nuclei,
-        hematoxylin_channel,
+        hema_work,
         outer,
         inner,
         nuclei_threshold,
         tissue,
     )
+
+    # ── Tile mode: strip the reflect padding from all spatial outputs ─────
+    if mode == "tile":
+        p = tile_pad
+        inner = inner[p:-p, p:-p]
+        outer = outer[p:-p, p:-p]
+        epi_nuclei = epi_nuclei[p:-p, p:-p]
+        other_nuclei = other_nuclei[p:-p, p:-p]
+        tissue = tissue[p:-p, p:-p]  # all-True slice; kept for assign_labels
 
     mask_set = MaskSet(
         inner=inner,

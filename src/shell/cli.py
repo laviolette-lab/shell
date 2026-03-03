@@ -130,8 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Optional: save raw model predictions as a 2-band uint8 image "
-            "(band 0 = inner / lumen, band 1 = outer / epithelium). "
+            "Optional: save raw model predictions as a 3-band uint8 image "
+            "(band 0 = inner / lumen, band 1 = outer / epithelium, "
+            "band 2 = background), scaled to 0/255. "
+            "Saved at the original input resolution. "
             "Useful for debugging or re-running post-processing offline."
         ),
     )
@@ -144,6 +146,28 @@ def build_parser() -> argparse.ArgumentParser:
             "Post-processing filter profile. "
             "'best_effort' (default) balances sensitivity and precision; "
             "'precise' is more conservative; 'sensitive' keeps more predictions."
+        ),
+    )
+    infer_p.add_argument(
+        "--mode",
+        type=str,
+        default="wsi",
+        choices=["wsi", "biopsy", "tile"],
+        help=(
+            "Post-processing mode. "
+            "'wsi' (default): full pipeline with tissue restriction and urethra detection. "
+            "'biopsy': tissue restriction but no urethra detection. "
+            "'tile': no tissue mask/urethra; reflect-pads predictions before morphological ops. "
+            "Use 'tile' for individual image tiles that lack surrounding context."
+        ),
+    )
+    infer_p.add_argument(
+        "--tile-pad",
+        type=int,
+        default=None,
+        help=(
+            "Reflect-padding in pixels applied on each side in tile mode. "
+            "Defaults to 50%% of the shorter output dimension when not set."
         ),
     )
     infer_p.add_argument(
@@ -337,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
             save_eho=args.save_eho,
             save_raw=args.save_raw,
             profile=args.profile,
+            mode=args.mode,
+            tile_pad=args.tile_pad,
             device=args.device,
         )
 

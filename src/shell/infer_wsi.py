@@ -408,7 +408,10 @@ def infer_wsi(
     save_eho: str | None = None,
     save_raw: str | None = None,
     profile: str = "best_effort",
+    mode: str = "wsi",
+    tile_pad: int | None = None,
     device: str = "auto",
+    _model=None,
 ) -> np.ndarray:
     """Tiled inference pipeline with pyvips streaming.
 
@@ -441,10 +444,20 @@ def infer_wsi(
         :func:`preprocess_wsi` for details.
     :param save_eho: optional path to save the intermediate EHO image.
     :param save_raw: optional path to save the raw model predictions as a
-        two-band uint8 image (band 0 = inner, band 1 = outer).
+        three-band uint8 image (band 0 = inner/lumen, band 1 = outer/epithelium,
+        band 2 = background), scaled to 0/255.  Saved at the original input
+        resolution (same spatial extent as the returned label map).
+    :param _model: optional pre-loaded model (skips Phase 3 disk load). The
+        model must already be on the correct device and in eval mode.
     :param profile: post-processing filter profile.  One of
         ``"best_effort"``, ``"precise"``, or ``"sensitive"``.
         Defaults to ``"best_effort"``.
+    :param mode: post-processing mode — ``"wsi"`` (default, full pipeline
+        with tissue restriction and urethra detection), ``"biopsy"`` (tissue
+        restriction but no urethra detection), or ``"tile"`` (no tissue mask,
+        no urethra; reflect-pads the predictions before morphological ops).
+    :param tile_pad: padding in pixels for ``mode='tile'``.  ``None``
+        (default) auto-computes 50 % of the shorter output dimension.
     :param device: ``"auto"``, ``"cpu"``, ``"cuda"``, or ``"mps"``.
     :return: (H, W) uint8 label map at the original input resolution.
     """
@@ -558,8 +571,12 @@ def infer_wsi(
 
     # ── Phase 3: Load model ──────────────────────────────────────────
     t0 = perf_counter()
-    model = build_model(model_path, device, model_version=model_version)
-    timings["model_load"] = perf_counter() - t0
+    if _model is not None:
+        model = _model
+        timings["model_load"] = 0.0
+    else:
+        model = build_model(model_path, device, model_version=model_version)
+        timings["model_load"] = perf_counter() - t0
 
     # ── Phase 4: Tiled EHO + inference ───────────────────────────────
     t0 = perf_counter()
@@ -697,7 +714,7 @@ def infer_wsi(
         n_total, n_tissue, n_skipped, 100 * n_skipped / max(n_total, 1),
     )
 
-    # ── Phase 5: Save intermediates ──────────────────────────────────
+    # ── Phase 5: Save EHO intermediate ───────────────────────────────
     if save_eho and eho_full is not None:
         t0 = perf_counter()
         os.makedirs(os.path.dirname(save_eho) or ".", exist_ok=True)
@@ -705,27 +722,21 @@ def infer_wsi(
         del eho_full
         timings["save_eho"] = perf_counter() - t0
 
-    if save_raw:
-        t0 = perf_counter()
-        os.makedirs(os.path.dirname(save_raw) or ".", exist_ok=True)
-        raw_bands = np.stack(
-            [inner_pred.astype(np.uint8), outer_pred.astype(np.uint8)], axis=-1,
-        )
-        pyvips.Image.new_from_array(raw_bands).write_to_file(save_raw)
-        del raw_bands
-        timings["save_raw"] = perf_counter() - t0
-
     # ── Phase 6: Post-processing ─────────────────────────────────────
     t0 = perf_counter()
     label_map = post_process(
         inner_pred,
         outer_pred,
-        tissue_mask_full,
+        tissue_mask_full if mode == "wsi" or mode == "biopsy" else None,
         hematoxylin_full,
+        mode=mode,
         profile_name=profile,
+        tile_pad=tile_pad,
         verbose=True,
     )
-    del inner_pred, outer_pred, tissue_mask_full, hematoxylin_full
+    del tissue_mask_full, hematoxylin_full
+    if not save_raw:
+        del inner_pred, outer_pred
     gc.collect()
     timings["post_process"] = perf_counter() - t0
 
@@ -733,12 +744,36 @@ def infer_wsi(
     t0 = perf_counter()
     input_h, input_w = _read_image_size(input_path)
     label_map = _resize_label_map_nearest(label_map, input_h, input_w)
+    # Also resize raw predictions to original res before saving / returning
+    if save_raw:
+        inner_pred = _resize_label_map_nearest(
+            inner_pred.astype(np.uint8), input_h, input_w
+        ).astype(bool)
+        outer_pred = _resize_label_map_nearest(
+            outer_pred.astype(np.uint8), input_h, input_w
+        ).astype(bool)
     timings["resize"] = perf_counter() - t0
 
     t0 = perf_counter()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     pyvips.Image.new_from_array(label_map).write_to_file(output_path)
     timings["save"] = perf_counter() - t0
+
+    if save_raw:
+        t0 = perf_counter()
+        os.makedirs(os.path.dirname(save_raw) or ".", exist_ok=True)
+        # 3-band uint8 (0/255): inner, outer, background
+        raw_bands = np.stack(
+            [
+                (inner_pred.astype(np.uint8) * 255),
+                (outer_pred.astype(np.uint8) * 255),
+                ((~(inner_pred | outer_pred)).astype(np.uint8) * 255),
+            ],
+            axis=-1,
+        )
+        pyvips.Image.new_from_array(raw_bands).write_to_file(save_raw)
+        del raw_bands
+        timings["save_raw"] = perf_counter() - t0
 
     # ── Timing summary ───────────────────────────────────────────────
     # Exclude indented sub-timings from total (they're breakdowns of parent phases)
