@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     infer_p.add_argument(
         "--target-mpp",
         type=float,
-        default=1.0,
+        default=2.0,
         help="Desired output resolution (um/pixel).",
     )
     infer_p.add_argument(
@@ -177,7 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     omero_p.add_argument(
         "--target-mpp",
         type=float,
-        default=1.0,
+        default=2.0,
         help="Desired output resolution (um/pixel)",
     )
     omero_p.add_argument(
@@ -271,6 +271,17 @@ def build_parser() -> argparse.ArgumentParser:
             "concurrently. Each worker opens its own session. Higher "
             "values overlap more network I/O but consume more server "
             "sessions. Default 4."
+        ),
+    )
+    omero_p.add_argument(
+        "--profile",
+        type=str,
+        default="best_effort",
+        choices=["best_effort", "precise", "sensitive"],
+        help=(
+            "Post-processing filter profile. "
+            "'best_effort' (default) balances sensitivity and precision; "
+            "'precise' is more conservative; 'sensitive' keeps more predictions."
         ),
     )
 
@@ -374,6 +385,7 @@ def main(argv: list[str] | None = None) -> int:
                 min_tissue_frac=args.min_tissue_frac,
                 prefetch_depth=args.prefetch_depth,
                 num_fetch_workers=args.fetch_workers,
+                profile=args.profile,
             )
             log.debug("DIAG: infer_omero_wsi returned normally")
         except BaseException as e:

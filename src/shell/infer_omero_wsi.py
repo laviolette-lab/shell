@@ -1292,6 +1292,7 @@ def infer_omero_wsi(
     min_tissue_frac: float = 0.01,
     prefetch_depth: int = 8,
     num_fetch_workers: int = 4,
+    profile: str = "best_effort",
 ) -> np.ndarray:
     """Tile-based OMERO inference pipeline.
 
@@ -1633,6 +1634,15 @@ def infer_omero_wsi(
         )
         tiles_tissue = len(tile_schedule)
 
+        # Upscale tissue mask to full resolution for post-processing.
+        th_h, th_w = tissue_mask.shape
+        y_idx = np.clip(
+            (np.arange(out_h) * th_h / out_h).astype(np.int64), 0, th_h - 1,
+        )
+        x_idx = np.clip(
+            (np.arange(out_w) * th_w / out_w).astype(np.int64), 0, th_w - 1,
+        )
+        tissue_mask_full = tissue_mask[y_idx[:, None], x_idx[None, :]]
         del tissue_mask
         gc.collect()
 
@@ -1691,6 +1701,8 @@ def infer_omero_wsi(
             tile_overlap=tile_overlap,
             roi_size=inference_tile_size,
             sw_overlap=sw_overlap,
+            tissue_mask_full=tissue_mask_full,
+            profile=profile,
             num_fetch_workers=num_fetch_workers,
         )
 
@@ -1739,6 +1751,8 @@ def _run_pipeline(
     tile_overlap: int,
     roi_size: int,
     sw_overlap: float,
+    tissue_mask_full: np.ndarray | None = None,
+    profile: str = "best_effort",
     num_fetch_workers: int = 4,
 ) -> np.ndarray:
     """Producer/consumer pipeline: parallel fetch+EHO → inference in main.
@@ -1820,7 +1834,10 @@ def _run_pipeline(
         except Exception:
             logger.exception("Failed to start OMERO fetch thread; continuing.")
 
-        pred = np.zeros((out_h, out_w), dtype=np.uint8)
+        # Allocate canvases for inner/outer predictions and hematoxylin.
+        inner_pred = np.zeros((out_h, out_w), dtype=bool)
+        outer_pred = np.zeros((out_h, out_w), dtype=bool)
+        hematoxylin_full = np.zeros((out_h, out_w), dtype=np.uint8)
 
         eho_canvas: np.ndarray | None = None
         if save_eho:
@@ -1840,25 +1857,34 @@ def _run_pipeline(
             if eho_canvas is not None:
                 eho_canvas[oy0 : oy0 + oh, ox0 : ox0 + ow] = tile_eho
 
-            tile_pred = run_inference(
+            # Store hematoxylin channel (ch1) for nuclei segmentation.
+            hematoxylin_full[oy0 : oy0 + oh, ox0 : ox0 + ow] = tile_eho[:, :, 1]
+
+            inner_tile, outer_tile = run_inference(
                 tile_eho,
                 model,
                 device,
                 roi_size=(roi_size, roi_size),
                 overlap=sw_overlap,
+                return_raw=True,
             )
             del tile_eho
 
             # Write only the centre-cropped keep region to avoid seams.
-            ph, pw = tile_pred.shape[:2]
+            ph, pw = inner_tile.shape[:2]
             ky1 = min(keep_y0 + keep_h, ph)
             kx1 = min(keep_x0 + keep_w, pw)
-            kept = tile_pred[keep_y0:ky1, keep_x0:kx1]
             out_y0 = oy0 + keep_y0
             out_x0 = ox0 + keep_x0
-            ch, cw = kept.shape[:2]
-            pred[out_y0 : out_y0 + ch, out_x0 : out_x0 + cw] = kept
-            del tile_pred, kept
+            ch = ky1 - keep_y0
+            cw = kx1 - keep_x0
+            inner_pred[out_y0 : out_y0 + ch, out_x0 : out_x0 + cw] = (
+                inner_tile[keep_y0:ky1, keep_x0:kx1]
+            )
+            outer_pred[out_y0 : out_y0 + ch, out_x0 : out_x0 + cw] = (
+                outer_tile[keep_y0:ky1, keep_x0:kx1]
+            )
+            del inner_tile, outer_tile
 
             processed += 1
             if processed % 25 == 0:
@@ -1876,7 +1902,22 @@ def _run_pipeline(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        return _save_results(pred, eho_canvas, save_eho, output_path)
+        # ── Post-processing ──────────────────────────────────────────
+        from shell.post_process import post_process
+
+        logger.info("Running post-processing (profile=%s) …", profile)
+        label_map = post_process(
+            inner_pred,
+            outer_pred,
+            tissue_mask_full if tissue_mask_full is not None else np.ones((out_h, out_w), dtype=bool),
+            hematoxylin_full,
+            profile_name=profile,
+            verbose=True,
+        )
+        del inner_pred, outer_pred, hematoxylin_full, tissue_mask_full
+        gc.collect()
+
+        return _save_results(label_map, eho_canvas, save_eho, output_path)
 
     finally:
         fetch_thread.join(timeout=30)
