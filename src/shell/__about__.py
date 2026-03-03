@@ -3,4 +3,4 @@
 # SPDX-License-Identifier: MIT
 """Version information for shell."""
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
