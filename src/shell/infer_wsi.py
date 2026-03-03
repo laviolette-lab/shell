@@ -35,6 +35,7 @@ import numpy as np
 # own the same OpenMP/GCD thread infrastructure.
 from shell.inference import run_inference
 from shell.model import build_model
+from shell.post_process import PROFILES, post_process
 from shell.transforms import EHOd, TissueMaskd
 
 # pyvips intentionally after torch-loading shell imports above (macOS safety)
@@ -313,9 +314,11 @@ def infer_wsi(
     target_mpp: float = TARGET_MPP,
     mpp: float | None = None,
     save_eho: str | None = None,
+    save_raw: str | None = None,
+    profile: str = "best_effort",
     device: str = "auto",
 ) -> np.ndarray:
-    """Full pipeline: preprocess -> model -> label image.
+    """Full pipeline: preprocess -> model -> post-process -> label image.
 
     :param input_path: raw RGB image (TIFF, PNG, JPEG, etc.).
     :param output_path: where to save the uint8 label TIFF.
@@ -327,7 +330,12 @@ def infer_wsi(
     :param mpp: manual source um/px override.  See
         :func:`preprocess_wsi` for details.
     :param save_eho: optional path to save the intermediate EHO image.
-    :param device: ``"auto"``, ``"cpu"``, or ``"cuda"``.
+    :param save_raw: optional path to save the raw model predictions as a
+        two-band uint8 image (band 0 = inner, band 1 = outer).
+    :param profile: post-processing filter profile.  One of
+        ``"best_effort"``, ``"precise"``, or ``"sensitive"``.
+        Defaults to ``"best_effort"``.
+    :param device: ``"auto"``, ``"cpu"``, ``"cuda"``, or ``"mps"``.
     :return: (H, W) uint8 label map at the original input resolution.
     """
     import torch
@@ -340,7 +348,11 @@ def infer_wsi(
         else:
             device = "cpu"
 
-    # 1. Preprocess
+    if profile not in PROFILES:
+        available = ", ".join(sorted(PROFILES))
+        raise ValueError(f"Unknown profile {profile!r}. Available: {available}")
+
+    # 1. Preprocess → (H, W, 3) uint8 EHO image + tissue mask
     eho, tissue_mask = preprocess_wsi(
         input_path,
         target_mpp=target_mpp,
@@ -351,22 +363,44 @@ def infer_wsi(
         os.makedirs(os.path.dirname(save_eho) or ".", exist_ok=True)
         pyvips.Image.new_from_array(eho).write_to_file(save_eho)
 
-    # 2. Load model + inference
+    # Hematoxylin is EHO channel 1 (retained from here for post-processing).
+    hematoxylin = eho[:, :, 1].copy()  # uint8 (H, W)
+
+    # 2. Load model + raw inference → inner / outer boolean prediction masks
     model = build_model(model_path, device, model_version=model_version)
-    label_map = run_inference(
+    inner_pred, outer_pred = run_inference(
         eho,
         model,
         device,
-        tissue_mask=tissue_mask,
+        return_raw=True,
     )
-    del eho, model, tissue_mask
+    del eho, model
     gc.collect()
 
-    # 3. Always return/save at original input resolution.
+    if save_raw:
+        os.makedirs(os.path.dirname(save_raw) or ".", exist_ok=True)
+        raw_bands = np.stack(
+            [inner_pred.astype(np.uint8), outer_pred.astype(np.uint8)], axis=-1
+        )
+        pyvips.Image.new_from_array(raw_bands).write_to_file(save_raw)
+
+    # 3. Post-processing → full 7-class label map
+    label_map = post_process(
+        inner_pred,
+        outer_pred,
+        tissue_mask,
+        hematoxylin,
+        profile_name=profile,
+        verbose=True,
+    )
+    del inner_pred, outer_pred, tissue_mask, hematoxylin
+    gc.collect()
+
+    # 4. Always return/save at original input resolution.
     input_h, input_w = _read_image_size(input_path)
     label_map = _resize_label_map_nearest(label_map, input_h, input_w)
 
-    # 4. Save
+    # 5. Save
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     pyvips.Image.new_from_array(label_map).write_to_file(output_path)
 

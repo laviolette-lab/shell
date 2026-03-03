@@ -93,7 +93,8 @@ def run_inference(
     sw_batch_size: int | None = None,
     overlap: float = VAL_SW_OVERLAP,
     tissue_mask: np.ndarray | None = None,
-) -> np.ndarray:
+    return_raw: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Run sliding-window inference on an EHO (H, W, 3) uint8 image.
 
     :param eho_image: (H, W, 3) uint8 EHO image.
@@ -106,9 +107,14 @@ def run_inference(
         overlapping patch centres contribute more than edges, which
         eliminates the grid artefacts visible with ``mode="constant"``.
     :param tissue_mask: optional boolean mask (H, W) where ``True``
-        indicates tissue.  When supplied, non-tissue regions are forced
-        to background (label 0) in the output.
-    :return: (H, W) uint8 label map.
+        indicates tissue.  When supplied and *return_raw* is False,
+        non-tissue regions are forced to background (label 0) in the output.
+    :param return_raw: when True, return ``(inner_pred, outer_pred)`` as
+        boolean (H, W) numpy arrays instead of the final uint8 label map.
+        The downstream :func:`shell.post_process.post_process` call is then
+        responsible for building the full label image.
+    :return: ``(H, W)`` uint8 label map, or
+             ``(inner_pred, outer_pred)`` bool arrays when *return_raw* is True.
     """
     device_obj = torch.device(device) if isinstance(device, str) else device
 
@@ -273,22 +279,28 @@ def run_inference(
     bg_prob = probs[0, 2]  # channel 2 = background
     del probs
 
-    inner_mask = (inner_prob > 0.5) & (inner_prob > bg_prob)
-    outer_mask = (outer_prob > 0.5) & (outer_prob > bg_prob)
+    inner_mask_t = (inner_prob > 0.5) & (inner_prob > bg_prob)
+    outer_mask_t = (outer_prob > 0.5) & (outer_prob > bg_prob)
     del inner_prob, outer_prob, bg_prob
 
-    pred = np.zeros((inner_mask.shape[0], inner_mask.shape[1]), dtype=np.uint8)
-    # Stroma first so epithelium takes priority at overlaps
-    pred[outer_mask.numpy()] = 2
-    pred[inner_mask.numpy()] = 1
-    del inner_mask, outer_mask
-
-    # Apply tissue mask: force non-tissue regions to background
-    if tissue_mask is not None:
-        pred[~tissue_mask[: pred.shape[0], : pred.shape[1]]] = 0
+    inner_np = inner_mask_t.numpy().astype(bool)
+    outer_np = outer_mask_t.numpy().astype(bool)
+    del inner_mask_t, outer_mask_t
 
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+    if return_raw:
+        return inner_np, outer_np
+
+    # Backward-compatible path: build simple 0/1/2 label map.
+    pred = np.zeros_like(inner_np, dtype=np.uint8)
+    pred[outer_np] = 2  # stroma first so epithelium wins at overlaps
+    pred[inner_np] = 1
+    del inner_np, outer_np
+
+    if tissue_mask is not None:
+        pred[~tissue_mask[: pred.shape[0], : pred.shape[1]]] = 0
 
     return pred

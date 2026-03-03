@@ -33,7 +33,18 @@ PIL.Image.MAX_IMAGE_PIXELS = None  # disable DecompressionBombError for large WS
 # ---------------------------------------------------------------------------
 NUM_CLASSES: int = 3
 TILE_SIZE: tuple[int, int] = (320, 320)
-CLASS_NAMES: dict[int, str] = {0: "Background", 1: "Epithelium", 2: "Stroma"}
+
+#: Final label map produced by :mod:`shell.post_process`.
+CLASS_NAMES: dict[int, str] = {
+    0: "Background",
+    1: "Inner (lumen)",
+    2: "Outer (epithelium)",
+    3: "White / glass",
+    4: "Background tissue (stroma)",
+    5: "Epithelial nuclei",
+    6: "Other nuclei",
+    7: "Urethra",
+}
 
 # ---------------------------------------------------------------------------
 # Versioned model registry
@@ -146,9 +157,9 @@ def build_model(
         init_filters=16,
         in_channels=3,
         out_channels=num_classes,
-        dropout_prob=0.1,
+        dropout_prob=0.2,
         norm=("GROUP", {"num_groups": 8}),
-        act=("RELU", {"inplace": True}),
+        act=("MISH", {"inplace": True}),
         input_image_size=tile_size,
         vae_nz=256,
         vae_estimate_std=True,

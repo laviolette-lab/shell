@@ -126,6 +126,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional: also save the intermediate EHO image.",
     )
     infer_p.add_argument(
+        "--save-raw",
+        type=str,
+        default=None,
+        help=(
+            "Optional: save raw model predictions as a 2-band uint8 image "
+            "(band 0 = inner / lumen, band 1 = outer / epithelium). "
+            "Useful for debugging or re-running post-processing offline."
+        ),
+    )
+    infer_p.add_argument(
+        "--profile",
+        type=str,
+        default="best_effort",
+        choices=["best_effort", "precise", "sensitive"],
+        help=(
+            "Post-processing filter profile. "
+            "'best_effort' (default) balances sensitivity and precision; "
+            "'precise' is more conservative; 'sensitive' keeps more predictions."
+        ),
+    )
+    infer_p.add_argument(
         "--device",
         type=str,
         default="auto",
@@ -303,6 +324,8 @@ def main(argv: list[str] | None = None) -> int:
             target_mpp=args.target_mpp,
             mpp=args.mpp,
             save_eho=args.save_eho,
+            save_raw=args.save_raw,
+            profile=args.profile,
             device=args.device,
         )
 
