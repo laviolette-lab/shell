@@ -239,49 +239,38 @@ def _tile_positions(length: int, tile_size: int, margin: int) -> list[int]:
 
 
 def _compute_norm_stats(eho_hwc: np.ndarray) -> dict:
-    """Pre-compute normalisation constants from a representative EHO image.
+    """Pre-compute per-channel min/max from a representative EHO thumbnail.
 
-    The constants replicate the effect of the MONAI training-time
-    normalisation pipeline (``ScaleIntensityRanged`` → ``NormalizeIntensityd``
-    → ``ScaleIntensityd``) applied to the **full** image, so that per-tile
-    normalisation during tiled inference matches full-image behaviour.
+    Matches the training-time transform::
+
+        ScaleIntensityd(minv=0.0, maxv=1.0, channel_wise=True)
+
+    Statistics are derived from the thumbnail so that per-tile normalisation
+    during tiled inference is consistent across the whole slide.
 
     Parameters
     ----------
     eho_hwc : (H, W, 3) uint8 array
         EHO image (typically computed on a thumbnail).
     """
-    img = eho_hwc.astype(np.float32) / 255.0  # ScaleIntensityRanged
+    img = eho_hwc.astype(np.float32) / 255.0
 
-    ch_means: list[float] = []
-    ch_stds: list[float] = []
+    ch_mins: list[float] = []
+    ch_maxs: list[float] = []
     for c in range(3):
         ch = img[..., c]
-        nz = ch > 0
-        if nz.any():
-            ch_means.append(float(ch[nz].mean()))
-            ch_stds.append(float(max(ch[nz].std(), 1e-8)))
-        else:
-            ch_means.append(0.0)
-            ch_stds.append(1.0)
+        ch_mins.append(float(ch.min()))
+        ch_maxs.append(float(ch.max()))
 
-    # Apply normalisation in-place so we can read scale min/max
-    for c in range(3):
-        ch = img[..., c]
-        nz = ch > 0
-        if nz.any():
-            ch[nz] = (ch[nz] - ch_means[c]) / ch_stds[c]
-
-    return {
-        "ch_means": ch_means,
-        "ch_stds": ch_stds,
-        "scale_min": float(img.min()),
-        "scale_max": float(img.max()),
-    }
+    return {"ch_mins": ch_mins, "ch_maxs": ch_maxs}
 
 
 def _normalize_tile(eho_chw, norm_stats: dict):
-    """Normalise a (C, H, W) float tensor using pre-computed global stats.
+    """Normalise a (C, H, W) EHO tile using pre-computed global channel min/max.
+
+    Matches the training-time transform::
+
+        ScaleIntensityd(minv=0.0, maxv=1.0, channel_wise=True)
 
     Accepts either a ``torch.Tensor`` or a ``numpy.ndarray`` (converted
     internally).  Returns a ``torch.Tensor``.
@@ -290,18 +279,15 @@ def _normalize_tile(eho_chw, norm_stats: dict):
 
     if not isinstance(eho_chw, torch.Tensor):
         eho_chw = torch.from_numpy(eho_chw).float()
+    else:
+        eho_chw = eho_chw.float()
 
     out = eho_chw / 255.0
-    means = torch.tensor(norm_stats["ch_means"], dtype=out.dtype).view(3, 1, 1)
-    stds = torch.tensor(norm_stats["ch_stds"], dtype=out.dtype).view(3, 1, 1)
-    nz = out > 0
-    out = torch.where(nz, (out - means) / stds, out)
-
-    mn, mx = norm_stats["scale_min"], norm_stats["scale_max"]
-    rng = mx - mn
-    if rng > 1e-8:
-        out = (out - mn) / rng
-    return out
+    ch_mins = torch.tensor(norm_stats["ch_mins"], dtype=out.dtype).view(3, 1, 1)
+    ch_maxs = torch.tensor(norm_stats["ch_maxs"], dtype=out.dtype).view(3, 1, 1)
+    ranges = (ch_maxs - ch_mins).clamp(min=1e-8)
+    out = (out - ch_mins) / ranges
+    return out.clamp(0.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -718,7 +704,9 @@ def infer_wsi(
     if save_eho and eho_full is not None:
         t0 = perf_counter()
         os.makedirs(os.path.dirname(save_eho) or ".", exist_ok=True)
-        pyvips.Image.new_from_array(eho_full).write_to_file(save_eho)
+        eho_full = np.ascontiguousarray(eho_full)
+        log.info("Saving EHO: shape=%s dtype=%s C_contig=%s", eho_full.shape, eho_full.dtype, eho_full.flags["C_CONTIGUOUS"])
+        pyvips.Image.new_from_array(eho_full.astype(np.uint8)).write_to_file(save_eho)
         del eho_full
         timings["save_eho"] = perf_counter() - t0
 
@@ -756,7 +744,9 @@ def infer_wsi(
 
     t0 = perf_counter()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    pyvips.Image.new_from_array(label_map).write_to_file(output_path)
+    label_map = np.ascontiguousarray(label_map)
+    log.info("Saving label_map: shape=%s dtype=%s C_contig=%s", label_map.shape, label_map.dtype, label_map.flags["C_CONTIGUOUS"]) 
+    pyvips.Image.new_from_array(label_map.astype(np.uint8)).write_to_file(output_path)
     timings["save"] = perf_counter() - t0
 
     if save_raw:
@@ -771,7 +761,9 @@ def infer_wsi(
             ],
             axis=-1,
         )
-        pyvips.Image.new_from_array(raw_bands).write_to_file(save_raw)
+        raw_bands = np.ascontiguousarray(raw_bands)
+        log.info("Saving raw_bands: shape=%s dtype=%s C_contig=%s", raw_bands.shape, raw_bands.dtype, raw_bands.flags["C_CONTIGUOUS"]) 
+        pyvips.Image.new_from_array(raw_bands.astype(np.uint8)).write_to_file(save_raw)
         del raw_bands
         timings["save_raw"] = perf_counter() - t0
 

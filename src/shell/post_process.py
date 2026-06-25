@@ -119,6 +119,7 @@ from typing import Literal, NamedTuple
 
 import numpy as np
 import scipy.ndimage
+import skimage.filters
 import skimage.measure
 import skimage.morphology
 import skimage.util
@@ -354,8 +355,9 @@ def _fill_and_clean_tissue(crop: np.ndarray, min_size: int = 4096) -> None:
     ``skimage.morphology.remove_small_objects`` allocates for a 300M-pixel
     bool input via ``np.result_type(bool, float32) → float64``.
 
-    The downsampled result is upsampled back with nearest-neighbour and ANDed
-    into crop — conservative (never adds tissue pixels, only removes them).
+    The downsampled result is upsampled back with nearest-neighbour and
+    assigned directly into crop so that both filled holes and removed small
+    objects are correctly propagated at 1/4-scale resolution.
     """
     h, w = crop.shape
     THRESH = 4_000_000  # pixels; below this run at full resolution
@@ -389,8 +391,11 @@ def _fill_and_clean_tissue(crop: np.ndarray, min_size: int = 4096) -> None:
     # Upsample via np.repeat (no indexing temporaries larger than crop).
     big = np.repeat(np.repeat(small, S, axis=0)[:h, :], S, axis=1)[:, :w]
     del small
-    # Apply conservatively: only remove tissue pixels, never add.
-    np.logical_and(crop, big, out=crop)
+    # Assign the 1/4-scale result directly so that binary_fill_holes is
+    # correctly propagated back.  The previous conservative AND blocked
+    # hole-filling because lumen holes are False in crop, making
+    # crop AND big = False regardless of what binary_fill_holes produced.
+    crop[:] = big
     del big
 
 
@@ -411,6 +416,18 @@ def restrict_predictions_to_tissue(
       skimage would otherwise allocate.
     - When inner/outer are already bool arrays the masking is applied
       in-place (no copy), halving the transient allocation for those arrays.
+
+    *Design note*: predictions are clipped to the *hole-filled* tissue so
+    that inner predictions inside lumen holes are preserved (not zeroed out).
+    However, the *original* ``tissue_b`` (without hole-filling) is returned
+    for use by ``assign_labels``.  This ensures that:
+
+    * Lumen pixels — non-tissue in the original mask — are initially set to
+      white in ``assign_labels``, then overridden by the preserved inner
+      predictions → correctly labeled as inner.
+    * Tear pixels — non-tissue holes that are large voids, not lumens — have
+      no inner/outer predictions, so they remain labeled as white rather than
+      being incorrectly filled into the tissue region and labeled as stroma.
     """
     tissue_b = _as_bool(tissue_mask)
 
@@ -419,30 +436,34 @@ def restrict_predictions_to_tissue(
     if bbox is not None:
         crop = tissue_b[bbox].copy()
         _fill_and_clean_tissue(crop, min_size=4096)
-        tissue = np.zeros_like(tissue_b)
-        tissue[bbox] = crop
+        tissue_clip = np.zeros_like(tissue_b)
+        tissue_clip[bbox] = crop
         del crop
     else:
-        tissue = np.zeros_like(tissue_b)
-        _fill_and_clean_tissue(tissue, min_size=4096)
+        tissue_clip = np.zeros_like(tissue_b)
+        _fill_and_clean_tissue(tissue_clip, min_size=4096)
 
-    # Mask in-place when inputs are already bool — avoids allocating copies.
-    # The caller's arrays are modified, but they are not needed afterwards.
+    # Clip predictions to the hole-filled tissue so that inner predictions
+    # inside lumen holes are preserved.
     if inner.dtype == bool:
-        np.logical_and(inner, tissue, out=inner)
+        np.logical_and(inner, tissue_clip, out=inner)
         inner_out = inner
     else:
         inner_out = inner.astype(bool)
-        np.logical_and(inner_out, tissue, out=inner_out)
+        np.logical_and(inner_out, tissue_clip, out=inner_out)
 
     if outer.dtype == bool:
-        np.logical_and(outer, tissue, out=outer)
+        np.logical_and(outer, tissue_clip, out=outer)
         outer_out = outer
     else:
         outer_out = outer.astype(bool)
-        np.logical_and(outer_out, tissue, out=outer_out)
+        np.logical_and(outer_out, tissue_clip, out=outer_out)
 
-    return inner_out, outer_out, tissue
+    del tissue_clip
+
+    # Return the original (unfilled) tissue mask so that tears and other
+    # non-tissue holes remain non-tissue in the final label map (→ white).
+    return inner_out, outer_out, tissue_b
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -991,45 +1012,17 @@ def ensure_inner_border(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _equalise_hematoxylin(channel: np.ndarray) -> np.ndarray:
-    """Return a histogram-equalised **uint8** image, masking exact-zero pixels.
+def _dog_hematoxylin(hema: np.ndarray) -> np.ndarray:
+    """Return a Difference-of-Gaussians response map for the hematoxylin channel.
 
-    Replaces ``skimage.exposure.equalize_hist`` (which returns float64) with a
-    256-entry LUT-based implementation that stays entirely in uint8.  For a
-    ~320 Mpx tissue crop this eliminates the ~2.5 GB float64 intermediate,
-    reducing peak RAM by the same amount.  Callers that compare the result to a
-    float threshold in [0, 1] must scale the threshold to [0, 255] first
-    (see ``segment_nuclei``).
+    At 2 µm/px nuclei are 5–15 µm (2.5–7.5 px radius).
+      sigma_inner = 2 px ≈ 4 µm  — smooths to single-nucleus scale
+      sigma_outer = 8 px ≈ 16 µm — smooths to local background level
 
-    Zero pixels (background / padding from non-tissue tiles) are excluded from
-    the histogram so they do not shift the CDF, and are set to 0 in the output.
+    DoG > 0 at nucleus centres, ≈ 0 on uniform cytoplasm/stroma sheets.
     """
-    if channel.dtype.kind == "f":
-        u8 = skimage.util.img_as_ubyte(np.clip(channel, 0, 1))
-    else:
-        u8 = np.asarray(channel, dtype=np.uint8)
-
-    mask = u8 > 0
-    if not mask.any():
-        return np.zeros_like(u8)
-
-    # Build histogram over non-zero pixels; exclude 0 from the CDF.
-    hist = np.bincount(u8[mask].ravel(), minlength=256)
-    hist[0] = 0
-    cdf = hist.cumsum()
-    nz = cdf > 0
-    cdf_min = int(cdf[nz][0]) if nz.any() else 0
-    total = int(mask.sum())
-    denom = total - cdf_min
-    if denom <= 0:
-        return np.zeros_like(u8)
-
-    # 256-entry uint8 LUT; apply with direct integer indexing.
-    lut = (np.round((cdf - cdf_min).clip(0) / denom * 255)).astype(np.uint8)
-    lut[0] = 0  # keep background pixels as 0
-    result = lut[u8]
-    result[~mask] = 0
-    return result
+    hema_f = hema.astype(np.float32)
+    return scipy.ndimage.gaussian_filter(hema_f, sigma=2.0) - scipy.ndimage.gaussian_filter(hema_f, sigma=8.0)
 
 
 def segment_nuclei(
@@ -1039,7 +1032,7 @@ def segment_nuclei(
     threshold: float = 0.01,
     tissue_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Segment nuclei from the hematoxylin channel.
+    """Segment nuclei from the hematoxylin channel using Difference-of-Gaussians.
 
     Returns ``(epithelial_nuclei, other_nuclei)`` where:
 
@@ -1056,45 +1049,42 @@ def segment_nuclei(
         Definitive inner (lumen) mask.  Nuclei inside inner are excluded
         from *other_nuclei* (they are not stromal).
     threshold:
-        Equalised-intensity threshold — pixels *below* this are nuclei.
-        Default 0.01.
+        Unused — kept for API compatibility.  Detection is fully adaptive
+        via DoG + tissue-masked Otsu.
     tissue_mask:
-        If provided, "other nuclei" are restricted to tissue regions.
-        This prevents spurious detections in background/glass areas
-        where the hematoxylin channel may be zero (e.g. from tiled
-        pipelines that skip non-tissue tiles).
-
-    *Optimisation*: histogram equalisation is restricted to the tissue
-    bounding box so the float64 intermediate is much smaller than the
-    full slide array.
+        If provided, nuclei detection is restricted to tissue regions and
+        the Otsu threshold is computed only over tissue pixels, preventing
+        the background from warping the threshold.
     """
     shape = hematoxylin_channel.shape
     outer_b = _as_bool(outer_mask)
     inner_b = _as_bool(inner_mask) if inner_mask is not None else None
 
-    # Determine the working bbox — use tissue if available, else outer.
-    # Merge with the bbox of non-zero hematoxylin values so that the CDF
-    # of the histogram equalisation is identical to the full-array version.
     ref = _as_bool(tissue_mask) if tissue_mask is not None else outer_b
     bbox = _roi_bounding_box(ref)
     if bbox is None:
         return np.zeros(shape, dtype=bool), np.zeros(shape, dtype=bool)
 
-    # Fast O(H+W) scan for non-zero hematoxylin rows/columns.
-    rows = np.where(np.any(hematoxylin_channel, axis=1))[0]
-    cols = np.where(np.any(hematoxylin_channel, axis=0))[0]
-    if rows.size and cols.size:
-        h_bbox = (slice(int(rows[0]), int(rows[-1]) + 1),
-                  slice(int(cols[0]), int(cols[-1]) + 1))
-        bbox = _merge_bboxes(bbox, h_bbox)
+    hema_crop = hematoxylin_channel[bbox]
+    tissue_crop = ref[bbox]
 
-    # Histogram equalise within the bbox only.  _equalise_hematoxylin now
-    # returns uint8 (saves ~2.5 GB vs the previous float64 path); scale the
-    # float threshold to [0, 255] before comparing.
-    eq_crop = _equalise_hematoxylin(hematoxylin_channel[bbox])
-    uint8_thr = max(1, round(threshold * 255))
-    nuclei_crop = eq_crop < uint8_thr
-    del eq_crop
+    # DoG blob detector: scale-selective, self-normalising against stain
+    # intensity and local density variations (see _dog_hematoxylin).
+    dog_crop = _dog_hematoxylin(hema_crop)
+    del hema_crop
+
+    # Otsu threshold computed only on tissue pixels — the large background
+    # peak at ~0 would otherwise drag the threshold into the tissue range.
+    dog_tissue_vals = dog_crop[tissue_crop]
+    if dog_tissue_vals.size < 100:
+        return np.zeros(shape, dtype=bool), np.zeros(shape, dtype=bool)
+    dog_thresh = skimage.filters.threshold_otsu(dog_tissue_vals)
+    del dog_tissue_vals
+
+    nuclei_crop = (dog_crop > dog_thresh) & tissue_crop
+    del dog_crop
+
+    nuclei_crop = _remove_small_objects_int32(nuclei_crop, min_size=28)
 
     outer_crop = outer_b[bbox]
     epi_crop = nuclei_crop & outer_crop
@@ -1103,13 +1093,12 @@ def segment_nuclei(
     if inner_b is not None:
         exclude_crop = exclude_crop | inner_b[bbox]
     other_crop = nuclei_crop.copy()
-    other_crop[exclude_crop] = False  # mask in-place; avoids ~exclude_crop temp (0.25 GB)
+    other_crop[exclude_crop] = False
     del nuclei_crop, exclude_crop
 
     if tissue_mask is not None:
-        np.logical_and(other_crop, ref[bbox], out=other_crop)
+        np.logical_and(other_crop, tissue_crop, out=other_crop)
 
-    # Map back to full resolution.
     epithelial = np.zeros(shape, dtype=bool)
     epithelial[bbox] = epi_crop
     other = np.zeros(shape, dtype=bool)

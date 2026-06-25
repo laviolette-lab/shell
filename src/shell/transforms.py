@@ -527,6 +527,10 @@ def apply_eho_chunked(
     """Build a 3-channel EHO image memory-efficiently in row chunks.
 
     Returns (H, W, 3) uint8 with channels [Eosin, Hematoxylin, OD].
+
+    Channel convention (matches the training-time notebook EHOd):
+        high value = more stain / more optical density
+    Concentrations are percentile-normalised (1st–99th) and clipped to [0, 1].
     """
     H, W = image_np.shape[:2]
     eho = np.zeros((H, W, 3), dtype=np.uint8)
@@ -555,12 +559,12 @@ def apply_eho_chunked(
         e_conc -= e_lo_f
         e_conc /= e_range
         np.clip(e_conc, 0, 1, out=e_conc)
-        eho[r0:r1, :, 0] = (255 - (e_conc * 255)).astype(np.uint8)
+        eho[r0:r1, :, 0] = (e_conc * 255).astype(np.uint8)
 
         h_conc -= h_lo_f
         h_conc /= h_range
         np.clip(h_conc, 0, 1, out=h_conc)
-        eho[r0:r1, :, 1] = (255 - (h_conc * 255)).astype(np.uint8)
+        eho[r0:r1, :, 1] = (h_conc * 255).astype(np.uint8)
         del e_conc, h_conc
 
         od = chunk.mean(axis=2)
@@ -568,7 +572,7 @@ def apply_eho_chunked(
         od -= od_lo_f
         od /= od_range
         np.clip(od, 0, 1, out=od)
-        eho[r0:r1, :, 2] = (255 - (od * 255)).astype(np.uint8)
+        eho[r0:r1, :, 2] = (od * 255).astype(np.uint8)
         del od
 
     return eho

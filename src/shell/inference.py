@@ -7,9 +7,7 @@ Sliding-window inference for whole-slide EHO images.
 The normalisation pipeline uses MONAI transforms (``Compose``) to match
 the training-time preprocessing exactly::
 
-    ScaleIntensityRanged(a_min=0, a_max=255, b_min=0, b_max=1)
-    NormalizeIntensityd(nonzero=True, channel_wise=True)
-    ScaleIntensityd()
+    ScaleIntensityd(minv=0.0, maxv=1.0, channel_wise=True)
 
 Post-processing uses sigmoid activation with per-channel thresholding
 against the background probability, producing a clean label map.
@@ -31,18 +29,16 @@ from monai.inferers import sliding_window_inference
 from monai.transforms import (
     Compose,
     EnsureTyped,
-    NormalizeIntensityd,
     ScaleIntensityd,
-    ScaleIntensityRanged,
 )
 from torch.amp import autocast
 
 # ---------------------------------------------------------------------------
 # Default inference parameters
 # ---------------------------------------------------------------------------
-VAL_ROI_SIZE: tuple[int, int] = (2048, 2048)
-VAL_SW_BATCH: int = 16
-VAL_SW_OVERLAP: float = 0.25
+VAL_ROI_SIZE: tuple[int, int] = (1024, 1024)
+VAL_SW_BATCH: int = 1
+VAL_SW_OVERLAP: float = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -52,20 +48,13 @@ def _build_normalize_pipeline() -> Compose:
     """Return a MONAI ``Compose`` that normalises an EHO ``image`` tensor.
 
     Expects ``data["image"]`` to be a (C, H, W) uint8-range tensor.
+    Matches the training-time transform:
+        ScaleIntensityd(minv=0.0, maxv=1.0, channel_wise=True)
     """
     return Compose(
         [
             EnsureTyped(keys=["image"], track_meta=False),
-            ScaleIntensityRanged(
-                keys="image",
-                a_min=0.0,
-                a_max=255.0,
-                b_min=0.0,
-                b_max=1.0,
-                clip=True,
-            ),
-            NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True),
-            ScaleIntensityd(keys=["image"]),
+            ScaleIntensityd(keys=["image"], minv=0.0, maxv=1.0, channel_wise=True),
         ]
     )
 
