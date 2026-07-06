@@ -177,6 +177,7 @@ class MaskSet:
     other_nuclei: np.ndarray
     tissue: np.ndarray | None
     urethra: np.ndarray | None
+    filled_tissue: np.ndarray | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -403,11 +404,14 @@ def restrict_predictions_to_tissue(
     inner: np.ndarray,
     outer: np.ndarray,
     tissue_mask: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Clip inner/outer predictions to the preprocessing tissue mask.
 
     The tissue mask is filled and cleaned to produce a robust tissue area.
-    Returns (inner, outer, tissue).
+    Returns (inner, outer, tissue, filled_tissue) where *tissue* is the
+    original unfilled mask and *filled_tissue* is the hole-filled version
+    used to clip predictions.  Both are needed by ``assign_labels`` to
+    distinguish true slide background from tears inside tissue.
 
     *Optimisations*:
     - Tissue hole-fill and small-object removal use
@@ -459,11 +463,11 @@ def restrict_predictions_to_tissue(
         outer_out = outer.astype(bool)
         np.logical_and(outer_out, tissue_clip, out=outer_out)
 
-    del tissue_clip
-
     # Return the original (unfilled) tissue mask so that tears and other
     # non-tissue holes remain non-tissue in the final label map (→ white).
-    return inner_out, outer_out, tissue_b
+    # Also return the hole-filled version so assign_labels can distinguish
+    # true background (outside tissue) from tears (inside filled tissue).
+    return inner_out, outer_out, tissue_b, tissue_clip
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1129,11 +1133,26 @@ def assign_labels(masks: MaskSet, shape: tuple[int, int]) -> np.ndarray:
 
     if masks.tissue is not None:
         tissue_b = _as_bool(masks.tissue)
-        # Fill the label map as: everything=white, tissue→stroma, then
-        # overwrite with inner/outer/nuclei/urethra in priority order.
-        # This avoids ~tissue_b (322 MB temp) and a stroma copy (322 MB).
-        lm = np.full(shape, fill_value=LABEL_MAPPING["white"], dtype=np.uint8)
-        lm[tissue_b] = LABEL_MAPPING["background_tissue"]
+        # Use the hole-filled tissue boundary to distinguish true slide
+        # background (outside tissue entirely, label 0) from tears/lumen
+        # holes (inside the filled boundary but not tissue, label "white").
+        # Without this, all non-tissue pixels get "white" regardless of
+        # whether they are inside or outside the tissue region.
+        if masks.filled_tissue is not None:
+            filled_b = _as_bool(masks.filled_tissue)
+        else:
+            # Fallback: approximate filled boundary from the unfilled mask.
+            bbox = _roi_bounding_box(tissue_b)
+            filled_b = np.zeros(shape, dtype=bool)
+            if bbox is not None:
+                crop = tissue_b[bbox].copy()
+                scipy.ndimage.binary_fill_holes(crop, output=crop)
+                filled_b[bbox] = crop
+                del crop
+        lm = np.zeros(shape, dtype=np.uint8)         # 0 = true background
+        lm[filled_b] = LABEL_MAPPING["white"]         # tears inside tissue boundary
+        lm[tissue_b] = LABEL_MAPPING["background_tissue"]  # actual stroma
+        del filled_b
     else:
         lm = np.zeros(shape, dtype=np.uint8)
         lm[~(inner_b | outer_b)] = LABEL_MAPPING["background_tissue"]
@@ -1264,13 +1283,15 @@ def post_process(
         # Treat the entire padded region as tissue so downstream steps
         # never filter on tissue membership.
         tissue: np.ndarray = np.ones(inner.shape, dtype=bool)
+        # No true background exists in tile mode; filled_tissue is not needed.
+        filled_tissue: np.ndarray | None = None
     else:
         if tissue_mask is None:
             raise ValueError(
                 "tissue_mask is required for mode='wsi' and mode='biopsy'. "
                 "Use mode='tile' for single-tile inference without a tissue mask."
             )
-        inner, outer, tissue = _run(
+        inner, outer, tissue, filled_tissue = _run(
             "restrict_to_tissue",
             restrict_predictions_to_tissue,
             inner_pred,
@@ -1323,11 +1344,12 @@ def post_process(
         other_nuclei=other_nuclei,
         tissue=tissue,
         urethra=urethra,
+        filled_tissue=filled_tissue,
     )
     labeled = _run("assign_labels", assign_labels, mask_set, inner.shape)
 
     # Free heavyweight masks immediately; only the labelled map is needed.
-    del inner, outer, tissue, urethra, epi_nuclei, other_nuclei, mask_set
+    del inner, outer, tissue, filled_tissue, urethra, epi_nuclei, other_nuclei, mask_set
 
     if verbose:
         total = sum(timings.values())

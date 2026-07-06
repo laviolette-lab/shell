@@ -265,12 +265,17 @@ def _compute_norm_stats(eho_hwc: np.ndarray) -> dict:
     return {"ch_mins": ch_mins, "ch_maxs": ch_maxs}
 
 
-def _normalize_tile(eho_chw, norm_stats: dict):
-    """Normalise a (C, H, W) EHO tile using pre-computed global channel min/max.
+def _normalize_tile(eho_chw) -> "torch.Tensor":
+    """Normalise a (C, H, W) EHO uint8 tile to float32 [0, 1] per channel.
 
-    Matches the training-time transform::
+    Matches the training-time transform applied per crop::
 
         ScaleIntensityd(minv=0.0, maxv=1.0, channel_wise=True)
+
+    Each channel is independently stretched to [0, 1] using the tile's own
+    min/max.  Using per-tile statistics (rather than global thumbnail stats)
+    ensures the model receives inputs in its expected [0, 1] distribution
+    regardless of local staining variation.
 
     Accepts either a ``torch.Tensor`` or a ``numpy.ndarray`` (converted
     internally).  Returns a ``torch.Tensor``.
@@ -282,12 +287,16 @@ def _normalize_tile(eho_chw, norm_stats: dict):
     else:
         eho_chw = eho_chw.float()
 
-    out = eho_chw / 255.0
-    ch_mins = torch.tensor(norm_stats["ch_mins"], dtype=out.dtype).view(3, 1, 1)
-    ch_maxs = torch.tensor(norm_stats["ch_maxs"], dtype=out.dtype).view(3, 1, 1)
-    ranges = (ch_maxs - ch_mins).clamp(min=1e-8)
-    out = (out - ch_mins) / ranges
-    return out.clamp(0.0, 1.0)
+    out = eho_chw / 255.0  # uint8 → float [0, 1]
+    for c in range(out.shape[0]):
+        ch = out[c]
+        ch_min = ch.min()
+        ch_max = ch.max()
+        rng = ch_max - ch_min
+        if rng > 1e-8:
+            out[c] = (ch - ch_min) / rng
+        # else: constant channel (e.g. pure background) — leave as zeros
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -545,15 +554,7 @@ def infer_wsi(
     )
     timings["stain_params"] = perf_counter() - t0
 
-    # 2d. Normalisation constants from stain thumbnail EHO
-    t0 = perf_counter()
-    eho_thumb = apply_eho_chunked(
-        stain_thumb_np.astype(np.uint8),
-        **stain_params,
-    )
-    norm_stats = _compute_norm_stats(eho_thumb)
-    del stain_thumb_np, stain_bg, eho_thumb
-    timings["norm_stats"] = perf_counter() - t0
+    del stain_thumb_np, stain_bg
 
     # ── Phase 3: Load model ──────────────────────────────────────────
     t0 = perf_counter()
@@ -626,8 +627,7 @@ def infer_wsi(
             _te = perf_counter()
             n_tissue += 1
             tile_t = _normalize_tile(
-                torch.from_numpy(eho_tile).permute(2, 0, 1).float(),
-                norm_stats,
+                torch.from_numpy(eho_tile).permute(2, 0, 1),
             )
             del eho_tile
 
@@ -706,7 +706,8 @@ def infer_wsi(
         os.makedirs(os.path.dirname(save_eho) or ".", exist_ok=True)
         eho_full = np.ascontiguousarray(eho_full)
         log.info("Saving EHO: shape=%s dtype=%s C_contig=%s", eho_full.shape, eho_full.dtype, eho_full.flags["C_CONTIGUOUS"])
-        pyvips.Image.new_from_array(eho_full.astype(np.uint8)).write_to_file(save_eho)
+        eho_params = {"lossless": True} if save_eho.lower().endswith(".jp2") else {}
+        pyvips.Image.new_from_array(eho_full.astype(np.uint8)).write_to_file(save_eho, **eho_params)
         del eho_full
         timings["save_eho"] = perf_counter() - t0
 
@@ -746,7 +747,8 @@ def infer_wsi(
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     label_map = np.ascontiguousarray(label_map)
     log.info("Saving label_map: shape=%s dtype=%s C_contig=%s", label_map.shape, label_map.dtype, label_map.flags["C_CONTIGUOUS"]) 
-    pyvips.Image.new_from_array(label_map.astype(np.uint8)).write_to_file(output_path)
+    params = {"lossless": True} if output_path.lower().endswith(".jp2") else {}
+    pyvips.Image.new_from_array(label_map.astype(np.uint8)).write_to_file(output_path, **params)
     timings["save"] = perf_counter() - t0
 
     if save_raw:
@@ -763,7 +765,8 @@ def infer_wsi(
         )
         raw_bands = np.ascontiguousarray(raw_bands)
         log.info("Saving raw_bands: shape=%s dtype=%s C_contig=%s", raw_bands.shape, raw_bands.dtype, raw_bands.flags["C_CONTIGUOUS"]) 
-        pyvips.Image.new_from_array(raw_bands.astype(np.uint8)).write_to_file(save_raw)
+        raw_params = {"lossless": True} if save_raw.lower().endswith(".jp2") else {}
+        pyvips.Image.new_from_array(raw_bands.astype(np.uint8)).write_to_file(save_raw, **raw_params)
         del raw_bands
         timings["save_raw"] = perf_counter() - t0
 
