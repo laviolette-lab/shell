@@ -221,6 +221,7 @@ def _resize_label_map_nearest(
 # Tiled-pipeline helpers
 # ---------------------------------------------------------------------------
 
+
 def _tile_positions(length: int, tile_size: int, margin: int) -> list[int]:
     """Return tile start positions covering *length* with overlap margins.
 
@@ -657,7 +658,8 @@ def infer_wsi(
             if pad_h or pad_w:
                 _, _, ph, pw = logits.shape
                 logits = logits[
-                    :, :,
+                    :,
+                    :,
                     padding[2] : ph - padding[3],
                     padding[0] : pw - padding[1],
                 ]
@@ -696,7 +698,10 @@ def infer_wsi(
         torch.cuda.empty_cache()
     log.info(
         "Tiles: %d total, %d processed, %d skipped (%.0f%% skipped)",
-        n_total, n_tissue, n_skipped, 100 * n_skipped / max(n_total, 1),
+        n_total,
+        n_tissue,
+        n_skipped,
+        100 * n_skipped / max(n_total, 1),
     )
 
     # ── Phase 5: Save EHO intermediate ───────────────────────────────
@@ -704,9 +709,16 @@ def infer_wsi(
         t0 = perf_counter()
         os.makedirs(os.path.dirname(save_eho) or ".", exist_ok=True)
         eho_full = np.ascontiguousarray(eho_full)
-        log.info("Saving EHO: shape=%s dtype=%s C_contig=%s", eho_full.shape, eho_full.dtype, eho_full.flags["C_CONTIGUOUS"])
+        log.info(
+            "Saving EHO: shape=%s dtype=%s C_contig=%s",
+            eho_full.shape,
+            eho_full.dtype,
+            eho_full.flags["C_CONTIGUOUS"],
+        )
         eho_params = {"lossless": True} if save_eho.lower().endswith(".jp2") else {}
-        pyvips.Image.new_from_array(eho_full.astype(np.uint8)).write_to_file(save_eho, **eho_params)
+        pyvips.Image.new_from_array(eho_full.astype(np.uint8)).write_to_file(
+            save_eho, **eho_params
+        )
         del eho_full
         timings["save_eho"] = perf_counter() - t0
 
@@ -745,9 +757,16 @@ def infer_wsi(
     t0 = perf_counter()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     label_map = np.ascontiguousarray(label_map)
-    log.info("Saving label_map: shape=%s dtype=%s C_contig=%s", label_map.shape, label_map.dtype, label_map.flags["C_CONTIGUOUS"])
+    log.info(
+        "Saving label_map: shape=%s dtype=%s C_contig=%s",
+        label_map.shape,
+        label_map.dtype,
+        label_map.flags["C_CONTIGUOUS"],
+    )
     params = {"lossless": True} if output_path.lower().endswith(".jp2") else {}
-    pyvips.Image.new_from_array(label_map.astype(np.uint8)).write_to_file(output_path, **params)
+    pyvips.Image.new_from_array(label_map.astype(np.uint8)).write_to_file(
+        output_path, **params
+    )
     timings["save"] = perf_counter() - t0
 
     if save_raw:
@@ -763,9 +782,16 @@ def infer_wsi(
             axis=-1,
         )
         raw_bands = np.ascontiguousarray(raw_bands)
-        log.info("Saving raw_bands: shape=%s dtype=%s C_contig=%s", raw_bands.shape, raw_bands.dtype, raw_bands.flags["C_CONTIGUOUS"])
+        log.info(
+            "Saving raw_bands: shape=%s dtype=%s C_contig=%s",
+            raw_bands.shape,
+            raw_bands.dtype,
+            raw_bands.flags["C_CONTIGUOUS"],
+        )
         raw_params = {"lossless": True} if save_raw.lower().endswith(".jp2") else {}
-        pyvips.Image.new_from_array(raw_bands.astype(np.uint8)).write_to_file(save_raw, **raw_params)
+        pyvips.Image.new_from_array(raw_bands.astype(np.uint8)).write_to_file(
+            save_raw, **raw_params
+        )
         del raw_bands
         timings["save_raw"] = perf_counter() - t0
 

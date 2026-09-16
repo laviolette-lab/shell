@@ -210,9 +210,7 @@ def _roi_bounding_box(mask: np.ndarray) -> tuple[slice, ...] | None:
     return tuple(slice(int(c.min()), int(c.max()) + 1) for c in coords)
 
 
-def _padded_bbox(
-    mask: np.ndarray, pad: int = 1
-) -> tuple[slice, ...] | None:
+def _padded_bbox(mask: np.ndarray, pad: int = 1) -> tuple[slice, ...] | None:
     """Bounding-box slices with *pad* pixels of context on each side.
 
     For 2-D masks uses O(H+W) row/column projections (see ``_roi_bounding_box``
@@ -492,14 +490,12 @@ def detect_urethra(
     inner_b = _as_bool(inner)
     outer_b = _as_bool(outer)
 
-    roi = _merge_bboxes(
-        _roi_bounding_box(inner_b), _roi_bounding_box(outer_b)
-    )
+    roi = _merge_bboxes(_roi_bounding_box(inner_b), _roi_bounding_box(outer_b))
     if roi is None:
         return np.zeros(inner.shape, dtype=bool)
 
-    inner_crop = inner_b[roi]   # view — no extra allocation
-    outer_crop = outer_b[roi]   # view — no extra allocation
+    inner_crop = inner_b[roi]  # view — no extra allocation
+    outer_crop = outer_b[roi]  # view — no extra allocation
     combined_crop = inner_crop | outer_crop
     if not np.any(combined_crop):
         return np.zeros(inner.shape, dtype=bool)
@@ -507,24 +503,24 @@ def detect_urethra(
     # Single labelling of the combined crop --- one int32 array ~1.4 GB.
     labeled = np.empty(combined_crop.shape, dtype=np.int32)
     n_labels = int(scipy.ndimage.label(combined_crop, output=labeled))
-    del combined_crop       # free ~345 MB as soon as labelling is done
+    del combined_crop  # free ~345 MB as soon as labelling is done
 
     if n_labels == 0:
         return np.zeros(inner.shape, dtype=bool)
 
-    flat = labeled.ravel()                        # view — zero allocation
+    flat = labeled.ravel()  # view — zero allocation
     sizes = np.bincount(flat, minlength=n_labels + 1)
 
     # Count inner pixels per label without a full float64 copy:
     # index the flat label array by the inner boolean mask — the copied
     # sub-array is only as large as the number of inner pixels (~10-30 %).
-    inner_flat = inner_crop.ravel()               # bool view
-    inner_labels = flat[inner_flat]               # int32 copy of inner-pixel labels
+    inner_flat = inner_crop.ravel()  # bool view
+    inner_labels = flat[inner_flat]  # int32 copy of inner-pixel labels
     inner_sum = np.bincount(inner_labels, minlength=n_labels + 1)
     del inner_labels, flat
 
     # Candidates: inner fraction > 50 % AND inner pixel count >= min_area.
-    with np.errstate(divide='ignore', invalid='ignore'):
+    with np.errstate(divide="ignore", invalid="ignore"):
         frac = np.where(sizes > 0, inner_sum / sizes.astype(np.float64), 0.0)
     candidate_labels = np.where((frac > 0.5) & (inner_sum >= min_area))[0]
     candidate_labels = candidate_labels[candidate_labels > 0]
@@ -533,9 +529,7 @@ def detect_urethra(
         return np.zeros(inner.shape, dtype=bool)
 
     # Top-5 by combined size, then pick the one closest to the crop centre.
-    candidate_labels = candidate_labels[
-        np.argsort(-sizes[candidate_labels])
-    ][:5]
+    candidate_labels = candidate_labels[np.argsort(-sizes[candidate_labels])][:5]
     roi_center = np.array(inner_crop.shape) / 2.0
     best_label, best_dist = -1, np.inf
     for lbl in candidate_labels:
@@ -545,9 +539,7 @@ def detect_urethra(
         del mask
         if rows.size == 0:
             continue
-        dist = np.linalg.norm(
-            np.array([rows.mean(), cols.mean()]) - roi_center
-        )
+        dist = np.linalg.norm(np.array([rows.mean(), cols.mean()]) - roi_center)
         if dist < best_dist:
             best_dist, best_label = dist, lbl
 
@@ -595,7 +587,7 @@ def clean_small_holes(
     outer_b = _as_bool(outer)
 
     # Extra padding so holes near the boundary are still fully enclosed.
-    pad = max(10, int(min_hole_size ** 0.5) + 2)
+    pad = max(10, int(min_hole_size**0.5) + 2)
 
     inner_bbox = _padded_bbox(inner_b, pad=pad)
     if inner_bbox is not None:
@@ -748,7 +740,9 @@ def _outer_labels_contacting(
     reference_mask: np.ndarray,
     outer_bool: np.ndarray,
 ) -> np.ndarray:
-    struct = scipy.ndimage.generate_binary_structure(reference_mask.ndim, reference_mask.ndim)
+    struct = scipy.ndimage.generate_binary_structure(
+        reference_mask.ndim, reference_mask.ndim
+    )
     dilated = scipy.ndimage.binary_dilation(reference_mask, structure=struct)
     # Reuse the dilated buffer in-place to avoid a second crop-size bool alloc.
     np.logical_and(dilated, outer_bool, out=dilated)
@@ -897,7 +891,7 @@ def finalise_masks(
     inner_b = _as_bool(inner)
     outer_b = _as_bool(outer)
 
-    pad = max(10, int(min_hole_size ** 0.5) + 2)
+    pad = max(10, int(min_hole_size**0.5) + 2)
     bbox = _merge_bboxes(_padded_bbox(inner_b, pad=pad), _padded_bbox(outer_b, pad=pad))
     if bbox is None:
         return np.zeros_like(inner_b), outer_b
@@ -937,7 +931,7 @@ def fill_inner_holes(inner: np.ndarray) -> np.ndarray:
     if bbox is None:
         return inner_b
 
-    inner_crop = inner_b[bbox].copy()         # contiguous copy for scipy
+    inner_crop = inner_b[bbox].copy()  # contiguous copy for scipy
     labeled_crop = np.empty(inner_crop.shape, dtype=np.int32)
     n: int = int(scipy.ndimage.label(inner_crop, output=labeled_crop))
     if n == 0:
@@ -1026,7 +1020,9 @@ def _dog_hematoxylin(hema: np.ndarray) -> np.ndarray:
     DoG > 0 at nucleus centres, ≈ 0 on uniform cytoplasm/stroma sheets.
     """
     hema_f = hema.astype(np.float32)
-    return scipy.ndimage.gaussian_filter(hema_f, sigma=2.0) - scipy.ndimage.gaussian_filter(hema_f, sigma=8.0)
+    return scipy.ndimage.gaussian_filter(
+        hema_f, sigma=2.0
+    ) - scipy.ndimage.gaussian_filter(hema_f, sigma=8.0)
 
 
 def segment_nuclei(
@@ -1149,8 +1145,8 @@ def assign_labels(masks: MaskSet, shape: tuple[int, int]) -> np.ndarray:
                 scipy.ndimage.binary_fill_holes(crop, output=crop)
                 filled_b[bbox] = crop
                 del crop
-        lm = np.zeros(shape, dtype=np.uint8)         # 0 = true background
-        lm[filled_b] = LABEL_MAPPING["white"]         # tears inside tissue boundary
+        lm = np.zeros(shape, dtype=np.uint8)  # 0 = true background
+        lm[filled_b] = LABEL_MAPPING["white"]  # tears inside tissue boundary
         lm[tissue_b] = LABEL_MAPPING["background_tissue"]  # actual stroma
         del filled_b
     else:
@@ -1316,7 +1312,11 @@ def post_process(
     inner, outer = _run("finalise_masks", finalise_masks, inner, outer)
     inner = _run("fill_inner_holes", fill_inner_holes, inner)
     inner, outer = _run(
-        "ensure_inner_border", ensure_inner_border, inner, outer, border_px=inner_border_px
+        "ensure_inner_border",
+        ensure_inner_border,
+        inner,
+        outer,
+        border_px=inner_border_px,
     )
     epi_nuclei, other_nuclei = _run(
         "segment_nuclei",

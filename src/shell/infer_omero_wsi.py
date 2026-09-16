@@ -1637,10 +1637,14 @@ def infer_omero_wsi(
         # Upscale tissue mask to full resolution for post-processing.
         th_h, th_w = tissue_mask.shape
         y_idx = np.clip(
-            (np.arange(out_h) * th_h / out_h).astype(np.int64), 0, th_h - 1,
+            (np.arange(out_h) * th_h / out_h).astype(np.int64),
+            0,
+            th_h - 1,
         )
         x_idx = np.clip(
-            (np.arange(out_w) * th_w / out_w).astype(np.int64), 0, th_w - 1,
+            (np.arange(out_w) * th_w / out_w).astype(np.int64),
+            0,
+            th_w - 1,
         )
         tissue_mask_full = tissue_mask[y_idx[:, None], x_idx[None, :]]
         del tissue_mask
@@ -1878,12 +1882,12 @@ def _run_pipeline(
             out_x0 = ox0 + keep_x0
             ch = ky1 - keep_y0
             cw = kx1 - keep_x0
-            inner_pred[out_y0 : out_y0 + ch, out_x0 : out_x0 + cw] = (
-                inner_tile[keep_y0:ky1, keep_x0:kx1]
-            )
-            outer_pred[out_y0 : out_y0 + ch, out_x0 : out_x0 + cw] = (
-                outer_tile[keep_y0:ky1, keep_x0:kx1]
-            )
+            inner_pred[out_y0 : out_y0 + ch, out_x0 : out_x0 + cw] = inner_tile[
+                keep_y0:ky1, keep_x0:kx1
+            ]
+            outer_pred[out_y0 : out_y0 + ch, out_x0 : out_x0 + cw] = outer_tile[
+                keep_y0:ky1, keep_x0:kx1
+            ]
             del inner_tile, outer_tile
 
             processed += 1
@@ -1909,7 +1913,9 @@ def _run_pipeline(
         label_map = post_process(
             inner_pred,
             outer_pred,
-            tissue_mask_full if tissue_mask_full is not None else np.ones((out_h, out_w), dtype=bool),
+            tissue_mask_full
+            if tissue_mask_full is not None
+            else np.ones((out_h, out_w), dtype=bool),
             hematoxylin_full,
             profile_name=profile,
             verbose=True,
