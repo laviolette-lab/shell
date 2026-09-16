@@ -7,6 +7,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -18,11 +20,11 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pytest pytest-cov coverage[toml]>=6.2
+          python -m pip install hatch
 
       - name: Run pytest and generate coverage report
         run: |
-          pytest --cov=src --cov-report=xml:coverage.xml
+          hatch run test:cov --cov-report=xml:coverage.xml
 
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
@@ -31,14 +33,12 @@ jobs:
           path: ${{ github.workspace }}/coverage.xml
 
       - name: Upload coverage report to Codecov
-        if: ${{ secrets.CODECOV_TOKEN != '' }}
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v4
         with:
           fail_ci_if_error: true
           files: ${{ github.workspace }}/coverage.xml
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Skip Codecov upload (no token)
-        if: ${{ secrets.CODECOV_TOKEN == '' }}
+        if: env.CODECOV_TOKEN == ''
         run: echo "Skipping Codecov — CODECOV_TOKEN not set."

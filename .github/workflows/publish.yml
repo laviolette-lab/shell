@@ -28,6 +28,7 @@ jobs:
       - name: Build wheel and sdist inside Docker
         run: |
           docker run --rm \
+            --entrypoint hatch \
             -v "${{ github.workspace }}:/app" \
             -w /app \
             shell-ci:latest build
