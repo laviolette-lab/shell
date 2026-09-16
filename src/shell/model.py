@@ -33,7 +33,10 @@ PIL.Image.MAX_IMAGE_PIXELS = None  # disable DecompressionBombError for large WS
 # Default hyper-parameters (keep in sync with train.ipynb)
 # ---------------------------------------------------------------------------
 NUM_CLASSES: int = 3
-TILE_SIZE: tuple[int, int] = (320, 320)
+# The checkpoint's VAE projection layers are tied to this training shape.
+MODEL_INPUT_SIZE: tuple[int, int] = (320, 320)
+# The convolutional eval path is exported and deployed at this larger context.
+TILE_SIZE: tuple[int, int] = (2048, 2048)
 
 #: Final label map produced by :mod:`shell.post_process`.
 CLASS_NAMES: dict[int, str] = {
@@ -146,8 +149,8 @@ class ONNXModelWrapper:
             if isinstance(expected, int) and actual != expected:
                 raise ValueError(
                     f"ONNX model expects dimension {expected} at axis {axis}, "
-                    f"but received {actual}. Use {TILE_SIZE[0]}x{TILE_SIZE[1]} "
-                    "inference tiles."
+                        f"but received {actual}. Use the exported "
+                        f"{TILE_SIZE[0]}x{TILE_SIZE[1]} inference tile size."
                 )
         if x.device.type != "cpu":
             x = x.cpu()
@@ -165,7 +168,7 @@ def build_model(
     *,
     model_version: str | None = None,
     num_classes: int = NUM_CLASSES,
-    tile_size: tuple[int, int] = TILE_SIZE,
+    tile_size: tuple[int, int] = MODEL_INPUT_SIZE,
 ) -> SegResNetVAE:
     """Load a trained SegResNetVAE onto *device*.
 
