@@ -9,6 +9,14 @@ or simple checks does not eagerly import heavy runtime dependencies
 (like ``torch``, ``monai``, ``pyvips``, or ``omero``).
 """
 
+import warnings
+
 from .__about__ import __version__
+
+warnings.filterwarnings(
+    "ignore",
+    message=r".*torch.*jit.*interface.*",
+    category=FutureWarning,
+)
 
 __all__ = ["__version__"]

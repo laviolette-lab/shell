@@ -70,6 +70,15 @@ def _get_normalize() -> Compose:
     return _NORMALIZE
 
 
+def _resolve_autocast_device(device: torch.device) -> str:
+    """Return the appropriate autocast string for the requested device."""
+    if device.type == "cuda":
+        return "cuda"
+    if device.type == "mps":
+        return "mps"
+    return "cpu"
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -171,7 +180,7 @@ def run_inference(
         else _choose_sw_batch_size(roi_size, device_obj)
     )
 
-    amp_device = "cuda" if device_obj.type == "cuda" else "cpu"
+    amp_device = _resolve_autocast_device(device_obj)
     with (
         torch.inference_mode(),
         autocast(amp_device),

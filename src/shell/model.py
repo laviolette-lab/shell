@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.resources
 from pathlib import Path
+from types import MethodType
 
 import PIL.Image
 import torch
@@ -53,11 +54,42 @@ CLASS_NAMES: dict[int, str] = {
 #: To add a new model, place the ``.pth`` file in ``weights/`` and add an
 #: entry here.
 MODEL_REGISTRY: dict[str, str] = {
+    "v1": "model_v1.onnx",
+}
+
+LEGACY_MODEL_REGISTRY: dict[str, str] = {
     "v1": "model_v1.pth",
 }
 
 #: The version tag used when no explicit model path is provided.
 LATEST_MODEL: str = "v1"
+
+
+def _resolve_bundled_weight_path(version: str | None = None) -> Path:
+    """Resolve a bundled weight artifact, preferring ONNX in packaged builds."""
+    if version is None:
+        version = LATEST_MODEL
+
+    if version not in MODEL_REGISTRY and version not in LEGACY_MODEL_REGISTRY:
+        available = ", ".join(sorted(set(MODEL_REGISTRY) | set(LEGACY_MODEL_REGISTRY)))
+        msg = f"Unknown model version {version!r}. Available versions: {available}"
+        raise KeyError(msg)
+
+    candidates = [MODEL_REGISTRY.get(version), LEGACY_MODEL_REGISTRY.get(version)]
+    seen: set[str] = set()
+    for filename in candidates:
+        if filename is None or filename in seen:
+            continue
+        seen.add(filename)
+        weights_pkg = importlib.resources.files("shell") / "weights" / filename
+        with importlib.resources.as_file(weights_pkg) as p:
+            resolved = Path(p)
+        if resolved.exists():
+            return resolved
+
+    missing = ", ".join(str(c) for c in candidates if c is not None)
+    msg = f"Bundled weight file not found for version {version!r}: {missing}"
+    raise FileNotFoundError(msg)
 
 
 def _resolve_bundled_weights(version: str | None = None) -> Path:
@@ -70,48 +102,47 @@ def _resolve_bundled_weights(version: str | None = None) -> Path:
     :raises FileNotFoundError: If the weight file is missing from the
         installed package.
     """
-    if version is None:
-        version = LATEST_MODEL
-
-    if version not in MODEL_REGISTRY:
-        available = ", ".join(sorted(MODEL_REGISTRY))
-        msg = f"Unknown model version {version!r}. Available versions: {available}"
-        raise KeyError(msg)
-
-    filename = MODEL_REGISTRY[version]
-
-    # importlib.resources works with both editable installs and proper
-    # wheels.  ``files()`` returns a Traversable; ``joinpath`` reaches
-    # into the sub-package.
-    weights_pkg = importlib.resources.files("shell") / "weights" / filename
-    # Materialise to a real filesystem path (may extract from a zip).
-    with importlib.resources.as_file(weights_pkg) as p:
-        resolved = Path(p)
-    if not resolved.exists():
-        msg = f"Bundled weight file not found: {resolved}"
-        raise FileNotFoundError(msg)
-    return resolved
+    return _resolve_bundled_weight_path(version)
 
 
 # ---------------------------------------------------------------------------
-# Patch SegResNetVAE.forward so eval skips the VAE loss branch
+# Safe eval-time wrapper for SegResNetVAE
 # ---------------------------------------------------------------------------
-def _patch_segresntvae_forward() -> None:
-    """Monkey-patch ``SegResNetVAE.forward`` to skip VAE loss at eval time."""
-
-    def _forward(self, x):
-        x_enc, down_x = self.encode(x)
-        down_x.reverse()
-        x_dec = self.decode(x_enc, down_x)
-        if self.training:
-            vae_loss = self._get_vae_loss(x, x_enc)
-            return x_dec, vae_loss
-        return x_dec
-
-    SegResNetVAE.forward = _forward
+def _eval_segresnetvae_forward(self, x):
+    """Run a SegResNetVAE forward pass while skipping VAE loss at eval time."""
+    x_enc, down_x = self.encode(x)
+    down_x.reverse()
+    x_dec = self.decode(x_enc, down_x)
+    if self.training:
+        vae_loss = self._get_vae_loss(x, x_enc)
+        return x_dec, vae_loss
+    return x_dec
 
 
-_patch_segresntvae_forward()
+class ONNXModelWrapper:
+    """Small wrapper that makes an ONNX Runtime session behave like a torch Module."""
+
+    def __init__(self, session, device: str = "cpu") -> None:
+        self.session = session
+        self.device = torch.device(device)
+        self._input_name = session.get_inputs()[0].name
+        self._output_name = session.get_outputs()[0].name
+
+    def to(self, device):
+        self.device = torch.device(device)
+        return self
+
+    def eval(self):
+        return self
+
+    def __call__(self, x):
+        if not isinstance(x, torch.Tensor):
+            x = torch.as_tensor(x)
+        if x.device.type != "cpu":
+            x = x.cpu()
+        inputs = {self._input_name: x.detach().cpu().numpy()}
+        outputs = self.session.run([self._output_name], inputs)[0]
+        return torch.from_numpy(outputs).to(self.device)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +183,24 @@ def build_model(
         resolved = _resolve_bundled_weights(model_version)
         model_path = str(resolved)
 
+    if model_path.lower().endswith(".onnx"):
+        try:
+            import onnxruntime as ort
+        except ModuleNotFoundError as exc:
+            msg = (
+                "ONNX export is enabled but onnxruntime is not installed; "
+                "install shell[onnx] or use a .pth checkpoint."
+            )
+            raise RuntimeError(msg) from exc
+
+        providers = ["CPUExecutionProvider"]
+        if device.type == "cuda":
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        elif device.type == "mps":
+            providers = ["CPUExecutionProvider"]
+        session = ort.InferenceSession(model_path, providers=providers)
+        return ONNXModelWrapper(session, device=device.type)
+
     model = SegResNetVAE(
         spatial_dims=2,
         init_filters=16,
@@ -168,4 +217,5 @@ def build_model(
     state = torch.load(model_path, map_location=device, weights_only=True)
     model.load_state_dict(state)
     model.eval()
+    model.forward = MethodType(_eval_segresnetvae_forward, model)
     return model

@@ -67,7 +67,7 @@ def _ensure_omero() -> None:
     if _OMERO_LOADED:
         return
     try:
-        import omero  # noqa: F401  (import to ensure runtime available)
+        import omero
         from omero.gateway import BlitzGateway as _BG
         from omero.model import enums as omero_enums
 
@@ -244,7 +244,7 @@ def create_omero_connection(
         # If we created a raw omero.client earlier (websocket path) attach it
         # to the BlitzGateway instance so it can be closed explicitly later.
         try:
-            setattr(conn, "_omero_ws_client", client)
+            conn._omero_ws_client = client
         except Exception:
             pass
         try:
@@ -1016,7 +1016,7 @@ def _precompute_tile_info(
 
 def _fetch_worker(
     worker_id: int,
-    conn: "BlitzGateway",
+    conn: BlitzGateway,
     work_queue: queue.Queue[Any],
     result_queue: queue.Queue[Any],
     stop_event: threading.Event,
@@ -1175,7 +1175,7 @@ def _parallel_fetch_coordinator(
             conn = create_omero_connection(host, port, username, password)
             conns.append(conn)
             logger.debug("Created OMERO connection for worker %d", i)
-        except Exception as exc:
+        except Exception:
             # Clean up any already-created connections and re-raise.
             for c in conns:
                 try:

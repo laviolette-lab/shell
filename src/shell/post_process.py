@@ -223,17 +223,17 @@ def _padded_bbox(
         if not rows.size:
             return None
         cols = np.where(np.any(mask, axis=0))[0]
-        H, W = mask.shape
+        height, width = mask.shape
         return (
-            slice(max(0, int(rows[0]) - pad), min(H, int(rows[-1]) + 1 + pad)),
-            slice(max(0, int(cols[0]) - pad), min(W, int(cols[-1]) + 1 + pad)),
+            slice(max(0, int(rows[0]) - pad), min(height, int(rows[-1]) + 1 + pad)),
+            slice(max(0, int(cols[0]) - pad), min(width, int(cols[-1]) + 1 + pad)),
         )
     # Generic N-D fallback.
     if not np.any(mask):
         return None
     coords = np.nonzero(mask)
     slices = []
-    for c, size in zip(coords, mask.shape):
+    for c, size in zip(coords, mask.shape, strict=True):
         lo = max(0, int(c.min()) - pad)
         hi = min(size, int(c.max()) + 1 + pad)
         slices.append(slice(lo, hi))
@@ -253,7 +253,7 @@ def _merge_bboxes(
     if not active:
         return None
     merged = []
-    for slices in zip(*active):
+    for slices in zip(*active, strict=True):
         lo = min(s.start for s in slices)
         hi = max(s.stop for s in slices)
         merged.append(slice(lo, hi))
@@ -273,13 +273,13 @@ def _remove_small_holes_inplace(ar: np.ndarray, area_threshold: int) -> None:
     """
     h, w = ar.shape
     if h * w > 4_000_000:
-        # ── downsampled path ──────────────────────────────────────────────
-        S = 4
-        small = ar[::S, ::S]           # strided view — no copy
-        small_copy = small.copy()      # contiguous bool, H/4 × W/4
-        small_thr = max(1, area_threshold // (S * S))
-        inv = ~small_copy              # H/4 × W/4 bool
-        labeled = np.empty(small_copy.shape, dtype=np.int32)  # H/4 × W/4 int32
+        # --- downsampled path ---
+        scale = 4
+        small = ar[::scale, ::scale]  # strided view — no copy
+        small_copy = small.copy()  # contiguous bool, H/4 x W/4
+        small_thr = max(1, area_threshold // (scale * scale))
+        inv = ~small_copy  # H/4 x W/4 bool
+        labeled = np.empty(small_copy.shape, dtype=np.int32)  # H/4 x W/4 int32
         n_s = int(scipy.ndimage.label(inv, output=labeled))
         del inv
         if n_s > 0:
@@ -293,13 +293,13 @@ def _remove_small_holes_inplace(ar: np.ndarray, area_threshold: int) -> None:
                 small_copy |= fill[labeled]
         del labeled
         # Expand filled pixels back to full resolution and OR into ar.
-        newly_filled = small_copy & ~small   # H/4 × W/4 bool — new fills only
+        newly_filled = small_copy & ~small  # H/4 x W/4 bool — new fills only
         del small_copy
         if newly_filled.any():
-            # np.repeat expands each row/col S times; slice to exact (h, w).
-            big = np.repeat(newly_filled, S, axis=0)[:h, :]
+            # np.repeat expands each row/col scale times; slice to exact (h, w).
+            big = np.repeat(newly_filled, scale, axis=0)[:h, :]
             del newly_filled
-            big = np.repeat(big, S, axis=1)[:, :w]
+            big = np.repeat(big, scale, axis=1)[:, :w]
             ar |= big
             del big
         return
@@ -361,8 +361,8 @@ def _fill_and_clean_tissue(crop: np.ndarray, min_size: int = 4096) -> None:
     objects are correctly propagated at 1/4-scale resolution.
     """
     h, w = crop.shape
-    THRESH = 4_000_000  # pixels; below this run at full resolution
-    if h * w <= THRESH:
+    threshold = 4_000_000  # pixels; below this run at full resolution
+    if h * w <= threshold:
         scipy.ndimage.binary_fill_holes(crop, output=crop)
         # Use scipy.ndimage.label (int32) to avoid skimage's float64 path.
         labeled = np.empty(crop.shape, dtype=np.int32)
@@ -376,10 +376,10 @@ def _fill_and_clean_tissue(crop: np.ndarray, min_size: int = 4096) -> None:
         return
 
     # --- Downsampled path: operate at 1/4 linear scale ---
-    S = 4
-    small = crop[::S, ::S].copy()
+    scale = 4
+    small = crop[::scale, ::scale].copy()
     scipy.ndimage.binary_fill_holes(small, output=small)
-    small_min = max(1, min_size // (S * S))
+    small_min = max(1, min_size // (scale * scale))
     labeled = np.empty(small.shape, dtype=np.int32)
     n = int(scipy.ndimage.label(small, output=labeled))
     if n > 0:
@@ -390,7 +390,7 @@ def _fill_and_clean_tissue(crop: np.ndarray, min_size: int = 4096) -> None:
     del labeled
 
     # Upsample via np.repeat (no indexing temporaries larger than crop).
-    big = np.repeat(np.repeat(small, S, axis=0)[:h, :], S, axis=1)[:, :w]
+    big = np.repeat(np.repeat(small, scale, axis=0)[:h, :], scale, axis=1)[:, :w]
     del small
     # Assign the 1/4-scale result directly so that binary_fill_holes is
     # correctly propagated back.  The previous conservative AND blocked

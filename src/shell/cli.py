@@ -155,10 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["wsi", "biopsy", "tile"],
         help=(
             "Post-processing mode. "
-            "'wsi' (default): full pipeline with tissue restriction and urethra detection. "
-            "'biopsy': tissue restriction but no urethra detection. "
-            "'tile': no tissue mask/urethra; reflect-pads predictions before morphological ops. "
-            "Use 'tile' for individual image tiles that lack surrounding context."
+            "'wsi' (default): full pipeline with tissue restriction and "
+            "urethra detection. 'biopsy': tissue restriction but no urethra "
+            "detection. 'tile': no tissue mask/urethra; reflect-pads "
+            "predictions before morphological ops. Use 'tile' for individual "
+            "image tiles that lack surrounding context."
         ),
     )
     infer_p.add_argument(
@@ -414,11 +415,10 @@ def main(argv: list[str] | None = None) -> int:
                 profile=args.profile,
             )
             log.debug("DIAG: infer_omero_wsi returned normally")
-        except BaseException as e:
+        except BaseException:
             # Catch and print Python-level exceptions; note segfaults (native crashes)
             # will not be caught here, but these diagnostics will show progress up to
             # the crash point.
-            import sys
             import traceback
 
             log.debug("DIAG: infer_omero_wsi raised an exception:")

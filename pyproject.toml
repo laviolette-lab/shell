@@ -34,6 +34,8 @@ dependencies = [
     "openslide-python",
     "macenko-pca",
     "scikit-image",
+    "onnxruntime-gpu>=1.17.0; platform_system == 'Linux' and platform_machine != 'arm64'",
+    "onnxruntime>=1.17.0; platform_system != 'Linux' or platform_machine == 'arm64'",
 ]
 
 [project.optional-dependencies]
@@ -53,8 +55,11 @@ path = "src/shell/__about__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/shell"]
+exclude = ["src/shell/weights/*.pth"]
+artifacts = ["src/shell/weights/*.onnx"]
 
 [tool.hatch.envs.default]
+installer = "uv"
 dependencies = ["setuptools>=82.0.0"]
 
 [tool.hatch.envs.default.scripts]
@@ -99,6 +104,16 @@ dependencies = [
 [tool.hatch.envs.docs.scripts]
 build-docs = "mkdocs build"
 serve-docs = "mkdocs serve"
+
+[tool.hatch.envs.export]
+dependencies = [
+    "onnx>=1.16.0",
+    "onnxruntime>=1.17.0",
+    "onnxscript>=0.1.0",
+    "setuptools>=82.0.0",
+]
+[tool.hatch.envs.export.scripts]
+export-model = "python scripts/export_onnx.py"
 
 [[tool.hatch.envs.all.matrix]]
 python = ["3.10", "3.11", "3.12"]
@@ -145,8 +160,11 @@ ignore = []
 # Scientific code uses uppercase variable names (Io, W, H) and import aliases
 # (F as torch.nn.functional, BlitzGateway as _BG) that violate pep8-naming.
 "src/shell/preprocessing.py" = ["N803", "N806"]
-"src/shell/inference.py" = ["N812"]
-"src/shell/infer_omero_wsi.py" = ["N814", "F401"]
+"src/shell/inference.py" = ["N812", "E501"]
+"src/shell/infer_omero_wsi.py" = ["N814", "F401", "N806", "E501"]
+"src/shell/infer_wsi.py" = ["N812", "N806", "E501", "T201", "F841", "F821"]
+"src/shell/post_process.py" = ["RUF002", "RUF003", "N806", "B905", "T201", "E501"]
+"src/shell/transforms.py" = ["N803", "N806", "RUF002", "E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["shell"]
@@ -157,4 +175,7 @@ docstring-code-format = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
+filterwarnings = [
+    'ignore:.*torch.*jit.*interface.*:FutureWarning',
+]
 xfail_strict = true

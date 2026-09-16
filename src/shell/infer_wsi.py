@@ -33,7 +33,6 @@ import numpy as np
 # runtime before libvips creates its own.  On macOS the reverse order
 # (pyvips before torch) causes a segfault because both runtimes race to
 # own the same OpenMP/GCD thread infrastructure.
-from shell.inference import run_inference
 from shell.model import build_model
 from shell.post_process import PROFILES, post_process
 from shell.transforms import (
@@ -265,7 +264,7 @@ def _compute_norm_stats(eho_hwc: np.ndarray) -> dict:
     return {"ch_mins": ch_mins, "ch_maxs": ch_maxs}
 
 
-def _normalize_tile(eho_chw) -> "torch.Tensor":
+def _normalize_tile(eho_chw) -> torch.Tensor:
     """Normalise a (C, H, W) EHO uint8 tile to float32 [0, 1] per channel.
 
     Matches the training-time transform applied per crop::
@@ -746,7 +745,7 @@ def infer_wsi(
     t0 = perf_counter()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     label_map = np.ascontiguousarray(label_map)
-    log.info("Saving label_map: shape=%s dtype=%s C_contig=%s", label_map.shape, label_map.dtype, label_map.flags["C_CONTIGUOUS"]) 
+    log.info("Saving label_map: shape=%s dtype=%s C_contig=%s", label_map.shape, label_map.dtype, label_map.flags["C_CONTIGUOUS"])
     params = {"lossless": True} if output_path.lower().endswith(".jp2") else {}
     pyvips.Image.new_from_array(label_map.astype(np.uint8)).write_to_file(output_path, **params)
     timings["save"] = perf_counter() - t0
@@ -764,7 +763,7 @@ def infer_wsi(
             axis=-1,
         )
         raw_bands = np.ascontiguousarray(raw_bands)
-        log.info("Saving raw_bands: shape=%s dtype=%s C_contig=%s", raw_bands.shape, raw_bands.dtype, raw_bands.flags["C_CONTIGUOUS"]) 
+        log.info("Saving raw_bands: shape=%s dtype=%s C_contig=%s", raw_bands.shape, raw_bands.dtype, raw_bands.flags["C_CONTIGUOUS"])
         raw_params = {"lossless": True} if save_raw.lower().endswith(".jp2") else {}
         pyvips.Image.new_from_array(raw_bands.astype(np.uint8)).write_to_file(save_raw, **raw_params)
         del raw_bands
