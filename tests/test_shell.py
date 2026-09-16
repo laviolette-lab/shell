@@ -2,6 +2,7 @@
 
 import warnings
 
+import pytest
 import torch
 
 from shell import __version__
@@ -66,3 +67,28 @@ def test_autocast_device_respects_target_device():
     assert _resolve_autocast_device(torch.device("cpu")) == "cpu"
     assert _resolve_autocast_device(torch.device("cuda")) == "cuda"
     assert _resolve_autocast_device(torch.device("mps")) == "mps"
+
+
+def test_onnx_wrapper_rejects_non_exported_spatial_shape():
+    """The ONNX wrapper should explain fixed-shape model input errors."""
+    from shell.model import ONNXModelWrapper
+
+    class Input:
+        def __init__(self):
+            self.name = "input"
+            self.shape = [1, 3, 320, 320]
+
+    class Output:
+        def __init__(self):
+            self.name = "logits"
+
+    class Session:
+        def get_inputs(self):
+            return [Input()]
+
+        def get_outputs(self):
+            return [Output()]
+
+    wrapper = ONNXModelWrapper(Session())
+    with pytest.raises(ValueError, match="320x320"):
+        wrapper(torch.zeros(1, 3, 2048, 2048))

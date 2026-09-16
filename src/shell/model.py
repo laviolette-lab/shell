@@ -138,6 +138,17 @@ class ONNXModelWrapper:
     def __call__(self, x):
         if not isinstance(x, torch.Tensor):
             x = torch.as_tensor(x)
+        expected_shape = self.session.get_inputs()[0].shape
+        actual_shape = tuple(x.shape)
+        for axis, (actual, expected) in enumerate(
+            zip(actual_shape, expected_shape, strict=False)
+        ):
+            if isinstance(expected, int) and actual != expected:
+                raise ValueError(
+                    f"ONNX model expects dimension {expected} at axis {axis}, "
+                    f"but received {actual}. Use {TILE_SIZE[0]}x{TILE_SIZE[1]} "
+                    "inference tiles."
+                )
         if x.device.type != "cpu":
             x = x.cpu()
         inputs = {self._input_name: x.detach().cpu().numpy()}
@@ -199,6 +210,13 @@ def build_model(
         elif device.type == "mps":
             providers = ["CPUExecutionProvider"]
         session = ort.InferenceSession(model_path, providers=providers)
+        active_providers = session.get_providers()
+        if device.type == "cuda" and "CUDAExecutionProvider" not in active_providers:
+            raise RuntimeError(
+                "CUDA was requested, but ONNX Runtime did not activate "
+                f"CUDAExecutionProvider. Active providers: {active_providers}. "
+                "Install onnxruntime-gpu and verify the CUDA libraries are available."
+            )
         return ONNXModelWrapper(session, device=device.type)
 
     model = SegResNetVAE(

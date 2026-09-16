@@ -33,7 +33,7 @@ import numpy as np
 # runtime before libvips creates its own.  On macOS the reverse order
 # (pyvips before torch) causes a segfault because both runtimes race to
 # own the same OpenMP/GCD thread infrastructure.
-from shell.model import build_model
+from shell.model import TILE_SIZE, build_model
 from shell.post_process import PROFILES, post_process
 from shell.transforms import (
     EHOd,
@@ -568,8 +568,8 @@ def infer_wsi(
     # ── Phase 4: Tiled EHO + inference ───────────────────────────────
     t0 = perf_counter()
 
-    tile_size = 2048
-    margin = 128
+    tile_size = TILE_SIZE[0]
+    margin = tile_size // 8
     min_tissue_frac = 0.01
 
     y_positions = _tile_positions(H, tile_size, margin)
@@ -631,9 +631,11 @@ def infer_wsi(
             )
             del eho_tile
 
-            # ── pad to multiple of 64 ──
-            pad_h = (64 - th % 64) % 64
-            pad_w = (64 - tw % 64) % 64
+            # ── pad to the fixed ONNX input shape ──
+            # Normal tiles are already 320x320; only slides smaller than one
+            # model tile need padding here.
+            pad_h = max(0, tile_size - th)
+            pad_w = max(0, tile_size - tw)
             if pad_h or pad_w:
                 padding = (
                     pad_w // 2,
