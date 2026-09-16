@@ -109,6 +109,15 @@ def _read_mpp_from_openslide(image_path: str) -> tuple[float, float] | None:
         slide.close()
 
 
+def _onnx_cuda_available() -> bool:
+    """Return whether ONNX Runtime advertises its CUDA execution provider."""
+    try:
+        import onnxruntime
+    except ImportError:
+        return False
+    return "CUDAExecutionProvider" in onnxruntime.get_available_providers()
+
+
 def _load_image(
     image_path: str,
 ) -> tuple[pyvips.Image | np.ndarray, str]:
@@ -464,7 +473,8 @@ def infer_wsi(
     timings: dict[str, float] = {}
 
     if device == "auto":
-        if torch.cuda.is_available():
+        onnx_model = model_path is None or model_path.lower().endswith(".onnx")
+        if torch.cuda.is_available() or (onnx_model and _onnx_cuda_available()):
             device = "cuda"
         elif torch.backends.mps.is_available():
             device = "mps"
@@ -522,24 +532,34 @@ def infer_wsi(
     )
     timings["thumbnail"] = perf_counter() - t0
 
-    # 2b. Tissue mask on small thumbnail → upscale to full resolution
+    # 2b. Tissue mask on small thumbnail -> upscale to full resolution
     t0 = perf_counter()
     bg_mask_small = detect_background(small_thumb_np)
     tissue_small = ~bg_mask_small
     th_h, th_w = tissue_small.shape
-    y_idx = np.clip((np.arange(H) * th_h / H).astype(np.int64), 0, th_h - 1)
-    x_idx = np.clip((np.arange(W) * th_w / W).astype(np.int64), 0, th_w - 1)
-    tissue_mask_full = tissue_small[y_idx[:, None], x_idx[None, :]]
+    mask_image = pyvips.Image.new_from_memory(
+        np.ascontiguousarray(tissue_small, dtype=np.uint8).tobytes(),
+        th_w,
+        th_h,
+        1,
+        "uchar",
+    )
+    tissue_mask_full = (
+        mask_image.resize(W / th_w, vscale=H / th_h, kernel="nearest")
+        .numpy()[:, :, 0]
+        .astype(bool)
+    )
     del bg_mask_small, tissue_small, small_thumb_np
     timings["tissue_mask"] = perf_counter() - t0
     tissue_pct = 100 * tissue_mask_full.mean()
     log.info("Tissue: %.1f%%", tissue_pct)
 
-    # 2c. Stain parameters on 4x thumbnail (matches EHOd behavior)
-    #     Reuse the small tissue mask (upscaled) instead of re-running
-    #     detect_background on the larger thumbnail.
+    # 2c. Stain parameters on a bounded thumbnail.
+    #     Calibration quality does not improve enough on giant thumbnails to
+    #     justify the quadratic memory and CPU cost.
     t0 = perf_counter()
-    stain_scale = min(1.0, max(512, max(H, W) // 4) / max(H, W))
+    stain_max_dimension = 2048
+    stain_scale = min(1.0, stain_max_dimension / max(H, W))
     stain_thumb_np = np.ascontiguousarray(
         vips_full.resize(stain_scale).numpy()[:, :, :3]
     )
