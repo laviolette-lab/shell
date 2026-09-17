@@ -1252,6 +1252,8 @@ def _save_results(
     """
     import pyvips  # must come after torch is loaded — see note above
 
+    pyvips.concurrency_set(12)
+
     if save_eho and eho_canvas is not None:
         os.makedirs(os.path.dirname(save_eho) or ".", exist_ok=True)
         pyvips.Image.new_from_array(eho_canvas).write_to_file(save_eho)
@@ -1667,6 +1669,7 @@ def infer_omero_wsi(
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
             import pyvips
 
+            pyvips.concurrency_set(12)
             pyvips.Image.new_from_array(pred).write_to_file(output_path)
             logger.info("Saved prediction to %s", output_path)
             return pred

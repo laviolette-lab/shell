@@ -46,6 +46,8 @@ from shell.transforms import (
 # pyvips intentionally after torch-loading shell imports above (macOS safety)
 import pyvips  # isort: skip
 
+pyvips.concurrency_set(12)
+
 log = logging.getLogger(__name__)
 
 _OPENSLIDE_MODULE: ModuleType | None = None
@@ -546,7 +548,7 @@ def infer_wsi(
     )
     tissue_mask_full = (
         mask_image.resize(W / th_w, vscale=H / th_h, kernel="nearest")
-        .numpy()[:, :, 0]
+        .numpy()
         .astype(bool)
     )
     del bg_mask_small, tissue_small, small_thumb_np
