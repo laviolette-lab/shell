@@ -293,21 +293,15 @@ def _normalize_tile(eho_chw) -> torch.Tensor:
     """
     import torch
 
-    if not isinstance(eho_chw, torch.Tensor):
-        eho_chw = torch.from_numpy(eho_chw).float()
-    else:
-        eho_chw = eho_chw.float()
-
-    out = eho_chw / 255.0  # uint8 → float [0, 1]
-    for c in range(out.shape[0]):
-        ch = out[c]
-        ch_min = ch.min()
-        ch_max = ch.max()
-        rng = ch_max - ch_min
-        if rng > 1e-8:
-            out[c] = (ch - ch_min) / rng
-        # else: constant channel (e.g. pure background) — leave as zeros
-    return out
+    if isinstance(eho_chw, torch.Tensor):
+        eho_chw = eho_chw.numpy()
+    out = eho_chw.astype(np.float32, copy=False) / 255.0
+    ch_min = out.min(axis=(1, 2), keepdims=True)
+    ch_max = out.max(axis=(1, 2), keepdims=True)
+    rng = ch_max - ch_min
+    normalized = np.zeros_like(out)
+    np.divide(out - ch_min, rng, out=normalized, where=rng > 1e-8)
+    return torch.from_numpy(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +410,7 @@ def infer_wsi(
     profile: str = "best_effort",
     mode: str = "wsi",
     tile_pad: int | None = None,
+    min_tissue_frac: float = 0.0,
     device: str = "auto",
     _model=None,
 ) -> np.ndarray:
@@ -464,6 +459,9 @@ def infer_wsi(
         no urethra; reflect-pads the predictions before morphological ops).
     :param tile_pad: padding in pixels for ``mode='tile'``.  ``None``
         (default) auto-computes 50 % of the shorter output dimension.
+    :param min_tissue_frac: minimum tissue fraction required to infer a tile.
+        The default ``0.0`` processes every tile containing any tissue pixel;
+        use a positive value to skip tiles with only sparse tissue.
     :param device: ``"auto"``, ``"cpu"``, ``"cuda"``, or ``"mps"``.
     :return: (H, W) uint8 label map at the original input resolution.
     """
@@ -524,13 +522,11 @@ def infer_wsi(
 
     # ── Phase 2: Thumbnail-based preprocessing ───────────────────────
 
-    # 2a. Create thumbnails
-    #     - Small (~2000px) for fast tissue masking
-    #     - 4x (~5000px) for stain parameter estimation (matching EHOd)
+    # 2a. Create one bounded analysis thumbnail for both preprocessing steps.
     t0 = perf_counter()
-    small_thumb_scale = min(1.0, 2000 / max(H, W))
+    analysis_scale = min(1.0, 2048 / max(H, W))
     small_thumb_np = np.ascontiguousarray(
-        vips_full.resize(small_thumb_scale).numpy()[:, :, :3]
+        vips_full.resize(analysis_scale).numpy()[:, :, :3]
     )
     timings["thumbnail"] = perf_counter() - t0
 
@@ -551,7 +547,7 @@ def infer_wsi(
         .numpy()
         .astype(bool)
     )
-    del bg_mask_small, tissue_small, small_thumb_np
+    del bg_mask_small, tissue_small
     timings["tissue_mask"] = perf_counter() - t0
     tissue_pct = 100 * tissue_mask_full.mean()
     log.info("Tissue: %.1f%%", tissue_pct)
@@ -560,11 +556,7 @@ def infer_wsi(
     #     Calibration quality does not improve enough on giant thumbnails to
     #     justify the quadratic memory and CPU cost.
     t0 = perf_counter()
-    stain_max_dimension = 2048
-    stain_scale = min(1.0, stain_max_dimension / max(H, W))
-    stain_thumb_np = np.ascontiguousarray(
-        vips_full.resize(stain_scale).numpy()[:, :, :3]
-    )
+    stain_thumb_np = small_thumb_np
     # Nearest-neighbour upscale of tissue mask to stain thumbnail size
     st_h, st_w = stain_thumb_np.shape[:2]
     st_y = np.clip((np.arange(st_h) * H / st_h).astype(np.int64), 0, H - 1)
@@ -576,7 +568,7 @@ def infer_wsi(
     )
     timings["stain_params"] = perf_counter() - t0
 
-    del stain_thumb_np, stain_bg
+    del stain_thumb_np, stain_bg, small_thumb_np
 
     # ── Phase 3: Load model ──────────────────────────────────────────
     t0 = perf_counter()
@@ -592,7 +584,8 @@ def infer_wsi(
 
     tile_size = TILE_SIZE[0]
     margin = tile_size // 8
-    min_tissue_frac = 0.01
+    if min_tissue_frac < 0 or min_tissue_frac > 1:
+        raise ValueError("min_tissue_frac must be between 0 and 1")
 
     y_positions = _tile_positions(H, tile_size, margin)
     x_positions = _tile_positions(W, tile_size, margin)
@@ -611,24 +604,62 @@ def infer_wsi(
     t_eho = 0.0
     t_model = 0.0
     t_stitch = 0.0
+    rgb_run: np.ndarray | None = None
 
     for y0 in y_positions:
-        for x0 in x_positions:
-            y1 = min(y0 + tile_size, H)
+        y1 = min(y0 + tile_size, H)
+        th = y1 - y0
+        tissue_fractions = [
+            tissue_mask_full[y0:y1, x0 : min(x0 + tile_size, W)].mean()
+            for x0 in x_positions
+        ]
+        tissue_flags = [
+            fraction > 0 if min_tissue_frac == 0 else fraction >= min_tissue_frac
+            for fraction in tissue_fractions
+        ]
+        run_ends: list[int | None] = [None] * len(x_positions)
+        run_end: int | None = None
+        for index in range(len(x_positions) - 1, -1, -1):
+            if tissue_flags[index]:
+                if run_end is None:
+                    run_end = min(x_positions[index] + tile_size, W)
+                run_ends[index] = run_end
+            else:
+                run_end = None
+
+        cached_run_start: int | None = None
+        cached_run_end: int | None = None
+        for index, x0 in enumerate(x_positions):
             x1 = min(x0 + tile_size, W)
-            th, tw = y1 - y0, x1 - x0
+            tw = x1 - x0
 
             # ── skip non-tissue tiles entirely ──
             # Zeros in hematoxylin_full are handled by the masked
             # equalize_hist in _equalise_hematoxylin.
-            if tissue_mask_full[y0:y1, x0:x1].mean() < min_tissue_frac:
+            if not tissue_flags[index]:
                 n_skipped += 1
+                rgb_run = None
+                cached_run_start = None
+                cached_run_end = None
                 continue
 
             # ── fetch RGB tile from pyvips ──
             _tf = perf_counter()
+            if cached_run_start is None:
+                cached_run_start = x0
+                cached_run_end = run_ends[index]
+                assert cached_run_end is not None
+                rgb_run = np.ascontiguousarray(
+                    vips_full.crop(
+                        cached_run_start,
+                        y0,
+                        cached_run_end - cached_run_start,
+                        th,
+                    ).numpy()[:, :, :3]
+                )
+            assert rgb_run is not None and cached_run_start is not None
             rgb_tile = np.ascontiguousarray(
-                vips_full.crop(x0, y0, tw, th).numpy()[:, :, :3]
+                rgb_run[:, x0 - cached_run_start : x1 - cached_run_start]
             )
 
             # ── EHO with pre-computed stain vectors ──

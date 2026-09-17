@@ -33,7 +33,8 @@ PIL.Image.MAX_IMAGE_PIXELS = None  # disable DecompressionBombError for large WS
 # Default hyper-parameters (keep in sync with train.ipynb)
 # ---------------------------------------------------------------------------
 NUM_CLASSES: int = 3
-TILE_SIZE: tuple[int, int] = (320, 320)
+TILE_SIZE: tuple[int, int] = (2048, 2048)
+MODEL_INPUT_SIZE: tuple[int, int] = (320, 320)
 
 #: Final label map produced by :mod:`shell.post_process`.
 CLASS_NAMES: dict[int, str] = {
@@ -146,9 +147,15 @@ class ONNXModelWrapper:
             if isinstance(expected, int) and actual != expected:
                 raise ValueError(
                     f"ONNX model expects dimension {expected} at axis {axis}, "
-                    f"but received {actual}. Use {TILE_SIZE[0]}x{TILE_SIZE[1]} "
-                    "inference tiles."
+                    f"but received {actual}."
                 )
+        if len(actual_shape) == 4 and (
+            actual_shape[-2] % 64 != 0 or actual_shape[-1] % 64 != 0
+        ):
+            raise ValueError(
+                "ONNX model requires spatial dimensions divisible by 64; "
+                f"received {actual_shape[-2]}x{actual_shape[-1]}."
+            )
         if x.device.type != "cpu":
             x = x.cpu()
         inputs = {self._input_name: x.detach().cpu().numpy()}
@@ -165,7 +172,7 @@ def build_model(
     *,
     model_version: str | None = None,
     num_classes: int = NUM_CLASSES,
-    tile_size: tuple[int, int] = TILE_SIZE,
+    tile_size: tuple[int, int] = MODEL_INPUT_SIZE,
 ) -> SegResNetVAE:
     """Load a trained SegResNetVAE onto *device*.
 

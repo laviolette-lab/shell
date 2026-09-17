@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 
-from shell.model import LATEST_MODEL, MODEL_REGISTRY, _resolve_bundled_weights
+from shell.model import LATEST_MODEL, MODEL_INPUT_SIZE, _resolve_bundled_weights
 
 
 def _build_model_for_export(device: torch.device) -> torch.nn.Module:
@@ -23,7 +23,7 @@ def _build_model_for_export(device: torch.device) -> torch.nn.Module:
         dropout_prob=0.2,
         norm=("GROUP", {"num_groups": 8}),
         act=("MISH", {"inplace": True}),
-        input_image_size=(320, 320),
+        input_image_size=MODEL_INPUT_SIZE,
         vae_nz=256,
         vae_estimate_std=True,
     ).to(device)
@@ -62,13 +62,14 @@ def export_onnx(
         dummy,
         str(target),
         export_params=True,
-        opset_version=17,
+        # PyTorch 2.14 emits Mish at opset 18; opset 17 cannot downgrade it.
+        opset_version=18,
         do_constant_folding=True,
         input_names=["input"],
         output_names=["logits"],
         dynamic_axes={
-            "input": {0: "batch_size"},
-            "logits": {0: "batch_size"},
+            "input": {0: "batch_size", 2: "height", 3: "width"},
+            "logits": {0: "batch_size", 2: "height", 3: "width"},
         },
     )
     return target
