@@ -4,19 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import importlib.resources
 from pathlib import Path
-from types import MethodType
 
 import torch
 
-from shell.model import (
-    LEGACY_MODEL_REGISTRY,
-    LATEST_MODEL,
-    MODEL_INPUT_SIZE,
-    TILE_SIZE,
-    _eval_segresnetvae_forward,
-)
+from shell.model import LATEST_MODEL, MODEL_REGISTRY, _resolve_bundled_weights
 
 
 def _build_model_for_export(device: torch.device) -> torch.nn.Module:
@@ -31,7 +23,7 @@ def _build_model_for_export(device: torch.device) -> torch.nn.Module:
         dropout_prob=0.2,
         norm=("GROUP", {"num_groups": 8}),
         act=("MISH", {"inplace": True}),
-        input_image_size=MODEL_INPUT_SIZE,
+        input_image_size=(320, 320),
         vae_nz=256,
         vae_estimate_std=True,
     ).to(device)
@@ -50,17 +42,13 @@ def export_onnx(
     if checkpoint is None:
         if version is None:
             version = LATEST_MODEL
-        checkpoint_name = LEGACY_MODEL_REGISTRY[version]
-        checkpoint_resource = importlib.resources.files("shell") / "weights" / checkpoint_name
-        with importlib.resources.as_file(checkpoint_resource) as checkpoint_path:
-            checkpoint = str(checkpoint_path)
+        checkpoint = str(_resolve_bundled_weights(version))
 
     dev = torch.device(device)
     model = _build_model_for_export(dev)
     state = torch.load(checkpoint, map_location=dev, weights_only=True)
     model.load_state_dict(state)
     model.eval()
-    model.forward = MethodType(_eval_segresnetvae_forward, model)
 
     if output is None:
         target = Path(checkpoint).with_suffix(".onnx")
@@ -68,13 +56,13 @@ def export_onnx(
         target = Path(output)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    dummy = torch.randn(1, 3, *TILE_SIZE, device=dev)
+    dummy = torch.randn(1, 3, 320, 320, device=dev)
     torch.onnx.export(
         model,
         dummy,
         str(target),
         export_params=True,
-        opset_version=18,
+        opset_version=17,
         do_constant_folding=True,
         input_names=["input"],
         output_names=["logits"],

@@ -652,7 +652,7 @@ def infer_wsi(
             del eho_tile
 
             # ── pad to the fixed ONNX input shape ──
-            # Normal tiles are already 2048x2048; only slides smaller than one
+            # Normal tiles are already 320x320; only slides smaller than one
             # model tile need padding here.
             pad_h = max(0, tile_size - th)
             pad_w = max(0, tile_size - tw)

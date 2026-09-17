@@ -76,7 +76,7 @@ def test_onnx_wrapper_rejects_non_exported_spatial_shape():
     class Input:
         def __init__(self):
             self.name = "input"
-            self.shape = [1, 3, 2048, 2048]
+            self.shape = [1, 3, 320, 320]
 
     class Output:
         def __init__(self):
@@ -90,5 +90,5 @@ def test_onnx_wrapper_rejects_non_exported_spatial_shape():
             return [Output()]
 
     wrapper = ONNXModelWrapper(Session())
-    with pytest.raises(ValueError, match="2048x2048"):
-        wrapper(torch.zeros(1, 3, 320, 320))
+    with pytest.raises(ValueError, match="320x320"):
+        wrapper(torch.zeros(1, 3, 2048, 2048))
