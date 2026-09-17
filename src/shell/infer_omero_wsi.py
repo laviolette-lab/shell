@@ -1820,7 +1820,7 @@ def _run_pipeline(
         # has already been initialised on the main thread.
         import torch  # type: ignore
 
-        from shell.inference import run_inference
+        from shell.inference import GaussianMaskAwareInference
 
         if device == "auto":
             try:
@@ -1832,6 +1832,12 @@ def _run_pipeline(
                     device = "cpu"
             except Exception:
                 device = "cpu"
+        inference_engine = GaussianMaskAwareInference(
+            model,
+            device,
+            roi_size=(roi_size, roi_size),
+            overlap=sw_overlap,
+        )
 
         # Start the fetch thread immediately; the heavy model runtime was
         # already initialised by the caller before calling _run_pipeline.
@@ -1867,14 +1873,7 @@ def _run_pipeline(
             # Store hematoxylin channel (ch1) for nuclei segmentation.
             hematoxylin_full[oy0 : oy0 + oh, ox0 : ox0 + ow] = tile_eho[:, :, 1]
 
-            inner_tile, outer_tile = run_inference(
-                tile_eho,
-                model,
-                device,
-                roi_size=(roi_size, roi_size),
-                overlap=sw_overlap,
-                return_raw=True,
-            )
+            inner_tile, outer_tile = inference_engine.predict_tile(tile_eho)
             del tile_eho
 
             # Write only the centre-cropped keep region to avoid seams.

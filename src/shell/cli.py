@@ -172,6 +172,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     infer_p.add_argument(
+        "--min-tissue-frac",
+        type=float,
+        default=0.05,
+        help=(
+            "Minimum tissue fraction for a local inference tile. "
+            "Rows are scheduled around tissue runs; default 0.05."
+        ),
+    )
+    infer_p.add_argument(
         "--device",
         type=str,
         default="auto",
@@ -364,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
             profile=args.profile,
             mode=args.mode,
             tile_pad=args.tile_pad,
+            min_tissue_frac=args.min_tissue_frac,
             device=args.device,
         )
 

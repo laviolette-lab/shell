@@ -72,6 +72,12 @@ def main() -> int:
     parser.add_argument("--device", type=str, default="auto", help="auto, cpu, cuda, or mps.")
     parser.add_argument("--mpp", type=float, default=None, help="Manual source um/px override.")
     parser.add_argument("--target-mpp", type=float, default=None, help="Target um/px. Defaults to shell's TARGET_MPP.")
+    parser.add_argument(
+        "--min-tissue-frac",
+        type=float,
+        default=None,
+        help="Minimum tissue fraction for mask-aware inference tiles.",
+    )
     parser.add_argument("--model-path", type=str, default=None, help="Explicit model weights path.")
     parser.add_argument("--model-version", type=str, default=None, help="Bundled model version tag.")
     parser.add_argument(
@@ -112,6 +118,8 @@ def main() -> int:
         kwargs["mpp"] = args.mpp
     if args.target_mpp is not None:
         kwargs["target_mpp"] = args.target_mpp
+    if args.min_tissue_frac is not None:
+        kwargs["min_tissue_frac"] = args.min_tissue_frac
 
     if args.skip_model:
         # infer_wsi resolves "auto" internally, but the dummy model still

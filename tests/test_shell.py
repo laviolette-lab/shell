@@ -69,6 +69,50 @@ def test_autocast_device_respects_target_device():
     assert _resolve_autocast_device(torch.device("mps")) == "mps"
 
 
+def test_mask_aware_tile_positions_shift_per_row():
+    """Mask-aware windows should move with tissue instead of using one x-grid."""
+    import numpy as np
+
+    from shell.infer_wsi import _mask_aware_tile_positions
+
+    tissue_mask = np.zeros((128, 500), dtype=bool)
+    tissue_mask[:64, 180:220] = True
+    tissue_mask[64:, 300:340] = True
+
+    top = _mask_aware_tile_positions(tissue_mask, 0, 64, 128, 16, 0.01)
+    bottom = _mask_aware_tile_positions(tissue_mask, 64, 128, 128, 16, 0.01)
+
+    assert top != bottom
+    assert top == [164]
+    assert bottom == [284]
+    assert _mask_aware_tile_positions(tissue_mask, 0, 0, 128, 16, 0.01) == []
+
+
+def test_gaussian_mask_aware_inference_returns_tile_masks():
+    """The shared engine should use Gaussian sliding-window inference."""
+    import numpy as np
+
+    from shell.inference import GaussianMaskAwareInference
+
+    class DummyModel:
+        def __call__(self, image):
+            return torch.zeros(
+                image.shape[0], 3, image.shape[2], image.shape[3]
+            )
+
+    engine = GaussianMaskAwareInference(
+        DummyModel(),
+        roi_size=(64, 64),
+        overlap=0.5,
+    )
+    inner, outer = engine.predict_tile(np.zeros((128, 128, 3), dtype=np.uint8))
+
+    assert inner.shape == (128, 128)
+    assert outer.shape == (128, 128)
+    assert not inner.any()
+    assert not outer.any()
+
+
 def test_onnx_wrapper_rejects_non_exported_spatial_shape():
     """The ONNX wrapper should explain fixed-shape model input errors."""
     from shell.model import ONNXModelWrapper

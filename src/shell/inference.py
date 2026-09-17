@@ -18,7 +18,6 @@ in the output, saving downstream processing.
 
 from __future__ import annotations
 
-import gc
 import os
 import warnings
 
@@ -191,17 +190,22 @@ def run_inference(
             message="Using a non-tuple sequence for multidimensional indexing",
             category=UserWarning,
         )
-        blend_mode = "gaussian" if overlap > 0 else "constant"
-        logits = sliding_window_inference(
-            img_t,
-            roi_size,
-            local_sw_batch,
-            model,
-            overlap=overlap,
-            sw_device=device_obj,
-            device=torch.device("cpu"),
-            mode=blend_mode,
-        )
+        if tuple(img_t.shape[-2:]) == tuple(roi_size) and not (pad_h or pad_w):
+            # Provider tiles already match the model ROI. Avoid MONAI's
+            # accumulator and importance-map setup for this single window.
+            logits = model(img_t.to(device_obj))
+        else:
+            blend_mode = "gaussian" if overlap > 0 else "constant"
+            logits = sliding_window_inference(
+                img_t,
+                roi_size,
+                local_sw_batch,
+                model,
+                overlap=overlap,
+                sw_device=device_obj,
+                device=torch.device("cpu"),
+                mode=blend_mode,
+            )
         # MONAI's sliding_window_inference may return a Tensor, a tuple/list
         # (e.g. when the model returns multiple outputs), or a dict. Normalise
         # to a single Tensor here so downstream code and the type-checker see
@@ -285,10 +289,6 @@ def run_inference(
     outer_np = outer_mask_t.numpy().astype(bool)
     del inner_mask_t, outer_mask_t
 
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
     if return_raw:
         return inner_np, outer_np
 
@@ -302,3 +302,49 @@ def run_inference(
         pred[~tissue_mask[: pred.shape[0], : pred.shape[1]]] = 0
 
     return pred
+
+
+class GaussianMaskAwareInference:
+    """Run Gaussian-blended model inference on tissue-focused tiles.
+
+    Data providers remain responsible for fetching and preparing EHO tiles;
+    this engine owns the model call and the sliding-window policy. A positive
+    overlap uses MONAI's Gaussian importance map to reduce patch-boundary
+    artefacts without requiring a full-slide score buffer.
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        device: torch.device | str = "cpu",
+        *,
+        roi_size: tuple[int, int] = VAL_ROI_SIZE,
+        overlap: float = VAL_SW_OVERLAP,
+        sw_batch_size: int | None = None,
+    ) -> None:
+        if not 0 <= overlap < 1:
+            raise ValueError("overlap must be in the range [0, 1)")
+        if any(size <= 0 or size % 64 for size in roi_size):
+            raise ValueError("roi_size dimensions must be positive multiples of 64")
+        self.model = model
+        self.device = torch.device(device)
+        self.roi_size = roi_size
+        self.overlap = overlap
+        self.sw_batch_size = sw_batch_size
+
+    def predict_tile(
+        self,
+        eho_image: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return Gaussian-blended inner and outer masks for one EHO tile."""
+        result = run_inference(
+            eho_image,
+            self.model,
+            self.device,
+            roi_size=self.roi_size,
+            sw_batch_size=self.sw_batch_size,
+            overlap=self.overlap,
+            return_raw=True,
+        )
+        assert isinstance(result, tuple)
+        return result

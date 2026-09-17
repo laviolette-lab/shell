@@ -249,6 +249,55 @@ def _tile_positions(length: int, tile_size: int, margin: int) -> list[int]:
     return pos
 
 
+def _mask_aware_tile_positions(
+    tissue_mask: np.ndarray,
+    y0: int,
+    y1: int,
+    tile_size: int,
+    margin: int,
+    min_tissue_frac: float,
+) -> list[int]:
+    """Return overlapping x-starts whose output cores contain tissue.
+
+    Starts are calculated independently for each row band. Contiguous tissue
+    runs are expanded by the crop margin, then covered with windows whose
+    usable cores meet at their edges. This keeps the input overlap while
+    avoiding windows that only cover empty gaps between tissue runs.
+    """
+    _, width = tissue_mask.shape
+    if y0 >= y1 or width == 0:
+        return []
+    if width <= tile_size:
+        fraction = float(tissue_mask[y0:y1].mean())
+        return [0] if fraction >= min_tissue_frac else []
+
+    column_has_tissue = tissue_mask[y0:y1].any(axis=0)
+    transitions = np.diff(np.r_[False, column_has_tissue, False].astype(np.int8))
+    run_starts = np.flatnonzero(transitions == 1)
+    run_ends = np.flatnonzero(transitions == -1)
+    step = tile_size - 2 * margin
+    last_start = width - tile_size
+    starts: set[int] = set()
+
+    for run_start, run_end in zip(run_starts, run_ends, strict=True):
+        start = max(0, int(run_start) - margin)
+        start = min(start, last_start)
+        while True:
+            tile_end = min(start + tile_size, width)
+            fraction = float(tissue_mask[y0:y1, start:tile_end].mean())
+            if fraction >= min_tissue_frac:
+                starts.add(start)
+            core_end = tile_end if tile_end == width else start + tile_size - margin
+            if core_end >= run_end:
+                break
+            next_start = min(start + step, last_start)
+            if next_start == start:
+                break
+            start = next_start
+
+    return sorted(starts)
+
+
 def _compute_norm_stats(eho_hwc: np.ndarray) -> dict:
     """Pre-compute per-channel min/max from a representative EHO thumbnail.
 
@@ -274,34 +323,6 @@ def _compute_norm_stats(eho_hwc: np.ndarray) -> dict:
         ch_maxs.append(float(ch.max()))
 
     return {"ch_mins": ch_mins, "ch_maxs": ch_maxs}
-
-
-def _normalize_tile(eho_chw) -> torch.Tensor:
-    """Normalise a (C, H, W) EHO uint8 tile to float32 [0, 1] per channel.
-
-    Matches the training-time transform applied per crop::
-
-        ScaleIntensityd(minv=0.0, maxv=1.0, channel_wise=True)
-
-    Each channel is independently stretched to [0, 1] using the tile's own
-    min/max.  Using per-tile statistics (rather than global thumbnail stats)
-    ensures the model receives inputs in its expected [0, 1] distribution
-    regardless of local staining variation.
-
-    Accepts either a ``torch.Tensor`` or a ``numpy.ndarray`` (converted
-    internally).  Returns a ``torch.Tensor``.
-    """
-    import torch
-
-    if isinstance(eho_chw, torch.Tensor):
-        eho_chw = eho_chw.numpy()
-    out = eho_chw.astype(np.float32, copy=False) / 255.0
-    ch_min = out.min(axis=(1, 2), keepdims=True)
-    ch_max = out.max(axis=(1, 2), keepdims=True)
-    rng = ch_max - ch_min
-    normalized = np.zeros_like(out)
-    np.divide(out - ch_min, rng, out=normalized, where=rng > 1e-8)
-    return torch.from_numpy(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +431,7 @@ def infer_wsi(
     profile: str = "best_effort",
     mode: str = "wsi",
     tile_pad: int | None = None,
-    min_tissue_frac: float = 0.0,
+    min_tissue_frac: float = 0.05,
     device: str = "auto",
     _model=None,
 ) -> np.ndarray:
@@ -460,15 +481,16 @@ def infer_wsi(
     :param tile_pad: padding in pixels for ``mode='tile'``.  ``None``
         (default) auto-computes 50 % of the shorter output dimension.
     :param min_tissue_frac: minimum tissue fraction required to infer a tile.
-        The default ``0.0`` processes every tile containing any tissue pixel;
-        use a positive value to skip tiles with only sparse tissue.
+        The default ``0.05`` skips tiles with only sparse tissue. Use ``0.0``
+        to infer every tile containing any tissue pixel.
     :param device: ``"auto"``, ``"cpu"``, ``"cuda"``, or ``"mps"``.
     :return: (H, W) uint8 label map at the original input resolution.
     """
     from time import perf_counter
 
     import torch
-    import torch.nn.functional as F
+
+    from shell.inference import GaussianMaskAwareInference
 
     timings: dict[str, float] = {}
 
@@ -578,17 +600,21 @@ def infer_wsi(
     else:
         model = build_model(model_path, device, model_version=model_version)
         timings["model_load"] = perf_counter() - t0
-
     # ── Phase 4: Tiled EHO + inference ───────────────────────────────
     t0 = perf_counter()
 
     tile_size = TILE_SIZE[0]
     margin = tile_size // 8
+    inference_engine = GaussianMaskAwareInference(
+        model,
+        device_obj,
+        roi_size=(tile_size, tile_size),
+        overlap=0.5,
+    )
     if min_tissue_frac < 0 or min_tissue_frac > 1:
         raise ValueError("min_tissue_frac must be between 0 and 1")
 
     y_positions = _tile_positions(H, tile_size, margin)
-    x_positions = _tile_positions(W, tile_size, margin)
 
     inner_pred = np.zeros((H, W), dtype=bool)
     outer_pred = np.zeros((H, W), dtype=bool)
@@ -597,7 +623,7 @@ def infer_wsi(
     # Only allocate full EHO when the user wants it saved
     eho_full = np.zeros((H, W, 3), dtype=np.uint8) if save_eho else None
 
-    n_total = len(y_positions) * len(x_positions)
+    n_total = len(y_positions) * len(_tile_positions(W, tile_size, margin))
     n_tissue = 0
     n_skipped = 0
     t_fetch = 0.0
@@ -609,6 +635,14 @@ def infer_wsi(
     for y0 in y_positions:
         y1 = min(y0 + tile_size, H)
         th = y1 - y0
+        x_positions = _mask_aware_tile_positions(
+            tissue_mask_full,
+            y0,
+            y1,
+            tile_size,
+            margin,
+            min_tissue_frac,
+        )
         tissue_fractions = [
             tissue_mask_full[y0:y1, x0 : min(x0 + tile_size, W)].mean()
             for x0 in x_positions
@@ -676,57 +710,11 @@ def infer_wsi(
             if eho_full is not None:
                 eho_full[y0:y1, x0:x1] = eho_tile
 
-            # ── normalise ──
+            # ── Gaussian sliding-window inference ──
             _te = perf_counter()
             n_tissue += 1
-            tile_t = _normalize_tile(
-                torch.from_numpy(eho_tile).permute(2, 0, 1),
-            )
+            inner_tile, outer_tile = inference_engine.predict_tile(eho_tile)
             del eho_tile
-
-            # ── pad to the fixed ONNX input shape ──
-            # Normal tiles are already 320x320; only slides smaller than one
-            # model tile need padding here.
-            pad_h = max(0, tile_size - th)
-            pad_w = max(0, tile_size - tw)
-            if pad_h or pad_w:
-                padding = (
-                    pad_w // 2,
-                    pad_w - pad_w // 2,
-                    pad_h // 2,
-                    pad_h - pad_h // 2,
-                )
-                tile_t = F.pad(tile_t.unsqueeze(0), padding, "reflect")
-            else:
-                tile_t = tile_t.unsqueeze(0)
-                padding = (0, 0, 0, 0)
-
-            # ── model forward pass ──
-            with torch.inference_mode():
-                logits = model(tile_t.to(device_obj))
-            if isinstance(logits, (tuple, list)):
-                logits = logits[0]
-            logits = logits.cpu()
-            del tile_t
-
-            # ── unpad ──
-            if pad_h or pad_w:
-                _, _, ph, pw = logits.shape
-                logits = logits[
-                    :,
-                    :,
-                    padding[2] : ph - padding[3],
-                    padding[0] : pw - padding[1],
-                ]
-
-            # ── sigmoid + threshold ──
-            probs = torch.sigmoid(logits)
-            inner_p = probs[0, 0]
-            outer_p = probs[0, 1]
-            bg_p = probs[0, 2]
-            inner_tile = ((inner_p > 0.5) & (inner_p > bg_p)).numpy()
-            outer_tile = ((outer_p > 0.5) & (outer_p > bg_p)).numpy()
-            del logits, probs
             t_model += perf_counter() - _te
 
             # ── center-crop stitch ──
@@ -743,6 +731,7 @@ def infer_wsi(
             outer_pred[oy0:oy1, ox0:ox1] = outer_tile[vy0:vy1, vx0:vx1]
             t_stitch += perf_counter() - _ts
 
+    n_skipped = max(0, n_total - n_tissue)
     timings["tiled_inference"] = perf_counter() - t0
     timings["  fetch+eho"] = t_fetch
     timings["  model+norm"] = t_model
