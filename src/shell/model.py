@@ -7,27 +7,54 @@ Model construction and helpers for SegResNetVAE inference.
 The VAE branch is only used during training; at eval time ``forward``
 returns logits directly.
 
-Model weights are bundled inside the package under ``weights/``.  The
-:data:`MODEL_REGISTRY` maps human-readable version tags to filenames,
-and :data:`LATEST_MODEL` always points at the current recommended
-version.  To upgrade the default model:
-
-1. Drop the new ``.pth`` file into ``src/shell/weights/``.
-2. Add an entry to :data:`MODEL_REGISTRY`.
-3. Update :data:`LATEST_MODEL`.
+ONNX models are bundled inside the package under ``weights/``. Source PTH
+checkpoints remain repository-only export inputs.
 """
 
 from __future__ import annotations
 
 import importlib.resources
+import os
 from pathlib import Path
-from types import MethodType
 
-import PIL.Image
 import torch
-from monai.networks.nets import SegResNetVAE
 
-PIL.Image.MAX_IMAGE_PIXELS = None  # disable DecompressionBombError for large WSIs
+
+def _detect_cpu_budget() -> int:
+    """Return a safe thread count, honoring cgroup CPU quotas.
+
+    ``os.cpu_count()`` reports the host's total cores even inside a
+    cgroup-limited container (e.g. 96 cores reported with an 8-core quota).
+    Sizing thread pools (ONNX Runtime, PyTorch) from the unclamped count
+    causes severe oversubscription that can look like a hang.
+    """
+    quota_cores: int | None = None
+    try:
+        cgroup_max = Path("/sys/fs/cgroup/cpu.max")
+        if cgroup_max.exists():
+            quota, period = cgroup_max.read_text().split()
+            if quota != "max":
+                quota_cores = max(1, int(quota) // int(period))
+        else:
+            quota_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+            period_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+            if quota_path.exists() and period_path.exists():
+                quota = int(quota_path.read_text())
+                period = int(period_path.read_text())
+                if quota > 0:
+                    quota_cores = max(1, quota // period)
+    except OSError:
+        quota_cores = None
+
+    try:
+        available = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        available = os.cpu_count() or 1
+
+    if quota_cores is not None:
+        available = min(available, quota_cores)
+
+    return max(1, available)
 
 # ---------------------------------------------------------------------------
 # Default hyper-parameters (keep in sync with train.ipynb)
@@ -46,20 +73,15 @@ CLASS_NAMES: dict[int, str] = {
     5: "Epithelial nuclei",
     6: "Other nuclei",
     7: "Urethra",
+    8: "Edge epithelium (WSI only)",
 }
 
 # ---------------------------------------------------------------------------
 # Versioned model registry
 # ---------------------------------------------------------------------------
-#: Maps version tags to weight filenames inside ``src/shell/weights/``.
-#: To add a new model, place the ``.pth`` file in ``weights/`` and add an
-#: entry here.
+#: Maps version tags to ONNX filenames inside ``src/shell/weights/``.
 MODEL_REGISTRY: dict[str, str] = {
     "v1": "model_v1.onnx",
-}
-
-LEGACY_MODEL_REGISTRY: dict[str, str] = {
-    "v1": "model_v1.pth",
 }
 
 #: The version tag used when no explicit model path is provided.
@@ -67,29 +89,23 @@ LATEST_MODEL: str = "v1"
 
 
 def _resolve_bundled_weight_path(version: str | None = None) -> Path:
-    """Resolve a bundled weight artifact, preferring ONNX in packaged builds."""
+    """Resolve a bundled ONNX artifact."""
     if version is None:
         version = LATEST_MODEL
 
-    if version not in MODEL_REGISTRY and version not in LEGACY_MODEL_REGISTRY:
-        available = ", ".join(sorted(set(MODEL_REGISTRY) | set(LEGACY_MODEL_REGISTRY)))
+    if version not in MODEL_REGISTRY:
+        available = ", ".join(sorted(MODEL_REGISTRY))
         msg = f"Unknown model version {version!r}. Available versions: {available}"
         raise KeyError(msg)
 
-    candidates = [MODEL_REGISTRY.get(version), LEGACY_MODEL_REGISTRY.get(version)]
-    seen: set[str] = set()
-    for filename in candidates:
-        if filename is None or filename in seen:
-            continue
-        seen.add(filename)
-        weights_pkg = importlib.resources.files("shell") / "weights" / filename
-        with importlib.resources.as_file(weights_pkg) as p:
-            resolved = Path(p)
-        if resolved.exists():
-            return resolved
+    filename = MODEL_REGISTRY[version]
+    weights_pkg = importlib.resources.files("shell") / "weights" / filename
+    with importlib.resources.as_file(weights_pkg) as p:
+        resolved = Path(p)
+    if resolved.exists():
+        return resolved
 
-    missing = ", ".join(str(c) for c in candidates if c is not None)
-    msg = f"Bundled weight file not found for version {version!r}: {missing}"
+    msg = f"Bundled ONNX model not found for version {version!r}: {filename}"
     raise FileNotFoundError(msg)
 
 
@@ -98,26 +114,12 @@ def _resolve_bundled_weights(version: str | None = None) -> Path:
 
     :param version: A key in :data:`MODEL_REGISTRY`.  ``None`` means
         :data:`LATEST_MODEL`.
-    :return: resolved :class:`~pathlib.Path` to the ``.pth`` file.
+    :return: resolved :class:`~pathlib.Path` to the ``.onnx`` file.
     :raises KeyError: If *version* is not in :data:`MODEL_REGISTRY`.
     :raises FileNotFoundError: If the weight file is missing from the
         installed package.
     """
     return _resolve_bundled_weight_path(version)
-
-
-# ---------------------------------------------------------------------------
-# Safe eval-time wrapper for SegResNetVAE
-# ---------------------------------------------------------------------------
-def _eval_segresnetvae_forward(self, x):
-    """Run a SegResNetVAE forward pass while skipping VAE loss at eval time."""
-    x_enc, down_x = self.encode(x)
-    down_x.reverse()
-    x_dec = self.decode(x_enc, down_x)
-    if self.training:
-        vae_loss = self._get_vae_loss(x, x_enc)
-        return x_dec, vae_loss
-    return x_dec
 
 
 class ONNXModelWrapper:
@@ -173,8 +175,8 @@ def build_model(
     model_version: str | None = None,
     num_classes: int = NUM_CLASSES,
     tile_size: tuple[int, int] = MODEL_INPUT_SIZE,
-) -> SegResNetVAE:
-    """Load a trained SegResNetVAE onto *device*.
+) -> torch.nn.Module:
+    """Load the bundled ONNX model onto *device*.
 
     The model weights can be specified in three ways (highest priority
     first):
@@ -191,7 +193,7 @@ def build_model(
     :param model_version: version tag for bundled weights (ignored when
         *model_path* is set).
     :param num_classes: number of output classes.
-    :param tile_size: spatial size used during training.
+    :param tile_size: retained for API compatibility; ONNX controls its shape.
     :return: the model in eval mode.
     """
     if isinstance(device, str):
@@ -201,46 +203,52 @@ def build_model(
         resolved = _resolve_bundled_weights(model_version)
         model_path = str(resolved)
 
-    if model_path.lower().endswith(".onnx"):
-        try:
-            import onnxruntime as ort
-        except ModuleNotFoundError as exc:
-            msg = (
-                "ONNX export is enabled but onnxruntime is not installed; "
-                "install shell[onnx] or use a .pth checkpoint."
-            )
-            raise RuntimeError(msg) from exc
+    if not model_path.lower().endswith(".onnx"):
+        raise ValueError(
+            "Inference requires an ONNX model. PTH checkpoints are supported "
+            "only by scripts/export_onnx.py."
+        )
 
+    try:
+        import onnxruntime as ort
+    except ModuleNotFoundError as exc:
+        msg = (
+            "onnxruntime is required for inference; install the "
+            "platform-appropriate package."
+        )
+        raise RuntimeError(msg) from exc
+
+    providers = ["CPUExecutionProvider"]
+    if device.type == "cuda":
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    elif device.type == "mps":
         providers = ["CPUExecutionProvider"]
-        if device.type == "cuda":
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-        elif device.type == "mps":
-            providers = ["CPUExecutionProvider"]
-        session = ort.InferenceSession(model_path, providers=providers)
-        active_providers = session.get_providers()
-        if device.type == "cuda" and "CUDAExecutionProvider" not in active_providers:
-            raise RuntimeError(
-                "CUDA was requested, but ONNX Runtime did not activate "
-                f"CUDAExecutionProvider. Active providers: {active_providers}. "
-                "Install onnxruntime-gpu and verify the CUDA libraries are available."
-            )
-        return ONNXModelWrapper(session, device=device.type)
 
-    model = SegResNetVAE(
-        spatial_dims=2,
-        init_filters=16,
-        in_channels=3,
-        out_channels=num_classes,
-        dropout_prob=0.2,
-        norm=("GROUP", {"num_groups": 8}),
-        act=("MISH", {"inplace": True}),
-        input_image_size=tile_size,
-        vae_nz=256,
-        vae_estimate_std=True,
-    ).to(device)
+    # The CPU arena allocator never returns memory to the OS once grown, so a
+    # long loop of many tile inferences (WSI tiling) steadily raises peak RSS.
+    # Disabling it trades a little per-call allocation overhead for bounded
+    # memory use, which matters far more for large slides than raw throughput.
+    #
+    # Thread counts are bounded to the real (cgroup-aware) CPU budget rather
+    # than left at ONNX Runtime's default, which sizes off the host's total
+    # core count and can wildly oversubscribe a quota-limited container.
+    cpu_budget = _detect_cpu_budget()
+    torch.set_num_threads(cpu_budget)
+    sess_options = ort.SessionOptions()
+    sess_options.enable_cpu_mem_arena = False
+    sess_options.enable_mem_pattern = False
+    sess_options.intra_op_num_threads = cpu_budget
+    sess_options.inter_op_num_threads = 1
+    session = ort.InferenceSession(
+        model_path, sess_options=sess_options, providers=providers
+    )
+    active_providers = session.get_providers()
+    if device.type == "cuda" and "CUDAExecutionProvider" not in active_providers:
+        raise RuntimeError(
+            "CUDA was requested, but ONNX Runtime did not activate "
+            f"CUDAExecutionProvider. Active providers: {active_providers}. "
+            "Install onnxruntime-gpu and verify the CUDA libraries are available."
+        ) from None
+    return ONNXModelWrapper(session, device=device.type)
 
-    state = torch.load(model_path, map_location=device, weights_only=True)
-    model.load_state_dict(state)
-    model.eval()
-    model.forward = MethodType(_eval_segresnetvae_forward, model)
-    return model
+    raise AssertionError("unreachable ONNX inference path")

@@ -12,7 +12,8 @@ A whole-slide image segmentation pipeline for H&E-stained histopathology.
 SHELL uses Macenko colour deconvolution and a SegResNetVAE to segment
 epithelium and lumen/stroma regions.
 
-Model weights are **bundled with the package** — no separate download required.
+The ONNX inference model is bundled with the package. The repository-only PTH
+checkpoint is used only when exporting a new ONNX bundle.
 
 ## Label Map
 
@@ -21,6 +22,7 @@ Model weights are **bundled with the package** — no separate download required
 | 0 | Background / White |
 | 1 | Epithelium |
 | 2 | Stroma |
+| 8 | Edge epithelium (WSI mode only) |
 
 ## Quick Start
 
@@ -52,10 +54,10 @@ To use a specific bundled model version:
 shell infer --input slide.tiff --output prediction.tiff --model-version v1
 ```
 
-To use your own weights instead:
+To use a custom ONNX model instead:
 
 ```console
-shell infer --input slide.tiff --output prediction.tiff --model-path /path/to/custom.pth
+shell infer --input slide.tiff --output prediction.tiff --model-path /path/to/custom.onnx
 ```
 
 ### CLI — OMERO Inference
@@ -91,28 +93,29 @@ model = build_model(device="cuda")
 # Specific bundled version
 model = build_model(model_version="v1", device="cuda")
 
-# Custom weights file
-model = build_model("/path/to/custom.pth", device="cuda")
+# Custom ONNX model
+model = build_model("/path/to/custom.onnx", device="cuda")
 ```
 
 ## Model Versioning
 
-Model weights live in `src/shell/weights/` and are registered in
+ONNX models live in `src/shell/weights/` and are registered in
 `shell.model.MODEL_REGISTRY`. The `LATEST_MODEL` constant controls which
 version is loaded by default.
 
 | Version | File | Notes |
 |---------|------|-------|
-| `v1` | `model_v1.pth` | Initial release — SegResNetVAE trained on H&E |
+| `v1` | `model_v1.onnx` | Initial release — SegResNetVAE trained on H&E |
 
 ### Adding a New Model
 
-1. Place the new `.pth` file in `src/shell/weights/`.
+1. Keep the source `.pth` checkpoint in the repository and export it with
+   `scripts/export_onnx.py`.
 2. Add an entry to `MODEL_REGISTRY` in `src/shell/model.py`:
    ```python
    MODEL_REGISTRY: dict[str, str] = {
-       "v1": "model_v1.pth",
-       "v2": "model_v2.pth",  # new
+      "v1": "model_v1.onnx",
+      "v2": "model_v2.onnx",  # new
    }
    ```
 3. Update `LATEST_MODEL`:
@@ -203,13 +206,13 @@ shell/
 │       ├── __init__.py          # Public API & version export
 │       ├── __about__.py         # Version string
 │       ├── cli.py               # CLI entry point
-│       ├── model.py             # SegResNetVAE model helpers & registry
+│       ├── model.py             # ONNX model helpers & registry
 │       ├── preprocessing.py     # Macenko deconvolution & EHO transform
 │       ├── inference.py         # Sliding-window inference
 │       ├── infer_wsi.py         # Local WSI pipeline
 │       ├── infer_omero_wsi.py   # OMERO WSI pipeline (tiled, pipelined)
 │       ├── weights/             # Bundled model weight files
-│       │   └── model_v1.pth
+│       │   └── model_v1.onnx
 │       └── py.typed             # PEP 561 marker
 ├── tests/                       # pytest test suite
 ├── docs/                        # MkDocs source files

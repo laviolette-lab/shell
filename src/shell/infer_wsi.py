@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import math
 import os
 import warnings
 from types import ModuleType
@@ -33,7 +34,7 @@ import numpy as np
 # runtime before libvips creates its own.  On macOS the reverse order
 # (pyvips before torch) causes a segfault because both runtimes race to
 # own the same OpenMP/GCD thread infrastructure.
-from shell.model import TILE_SIZE, build_model
+from shell.model import TILE_SIZE, _detect_cpu_budget, build_model
 from shell.post_process import PROFILES, post_process
 from shell.transforms import (
     EHOd,
@@ -46,7 +47,10 @@ from shell.transforms import (
 # pyvips intentionally after torch-loading shell imports above (macOS safety)
 import pyvips  # isort: skip
 
-pyvips.concurrency_set(12)
+# Bounded to the real (cgroup-aware) CPU budget: a fixed guess like 12 can
+# already oversubscribe a quota-limited container, and stacking it on top of
+# ONNX Runtime's own thread pool during real inference makes it much worse.
+pyvips.concurrency_set(_detect_cpu_budget())
 
 log = logging.getLogger(__name__)
 
@@ -233,70 +237,227 @@ def _resize_label_map_nearest(
 # ---------------------------------------------------------------------------
 
 
-def _tile_positions(length: int, tile_size: int, margin: int) -> list[int]:
-    """Return tile start positions covering *length* with overlap margins.
+def _passes_tissue_threshold(fraction: float, min_tissue_frac: float) -> bool:
+    """Apply the tissue-fraction gate, treating 0 as "any tissue at all"."""
+    return fraction > 0 if min_tissue_frac <= 0 else fraction >= min_tissue_frac
 
-    Each tile is ``tile_size`` pixels wide; adjacent tiles overlap by
-    ``2 * margin`` so the center-crop (minus margins on each side)
-    seamlessly covers *length*.
+
+def _tile_positions(
+    length: int,
+    tile_size: int,
+    min_overlap: float = 0.25,
+    max_overlap: float = 0.5,
+) -> tuple[list[int], int]:
+    """Return evenly spaced tile starts covering *length*.
+
+    Uses the fewest tiles whose overlap fraction stays within
+    ``[min_overlap, max_overlap]`` of *tile_size*. All adjacent tiles share
+    the same pixel overlap, so the center-crop stitching seam is identical
+    everywhere instead of one odd-sized tile snapped onto the end.
+
+    :return: ``(starts, overlap_px)``.
     """
     if length <= tile_size:
-        return [0]
-    step = tile_size - 2 * margin
-    pos = list(range(0, length - tile_size + 1, step))
-    if pos[-1] + tile_size < length:
-        pos.append(length - tile_size)
-    return pos
+        return [0], 0
+    if not 0 <= min_overlap <= max_overlap < 1:
+        raise ValueError("require 0 <= min_overlap <= max_overlap < 1")
 
+    step_min = max(1, round(tile_size * (1 - max_overlap)))
+    step_max = max(step_min, round(tile_size * (1 - min_overlap)))
+    span = length - tile_size
+    n_steps = max(1, math.ceil(span / step_max))
+    step = span / n_steps
+    last_start = length - tile_size
+    starts = sorted({min(round(i * step), last_start) for i in range(n_steps + 1)})
+    overlap_px = tile_size - round(step)
+    return starts, overlap_px
+
+import math
+import numpy as np
 
 def _mask_aware_tile_positions(
     tissue_mask: np.ndarray,
     y0: int,
     y1: int,
     tile_size: int,
-    margin: int,
+    min_overlap: float,
+    max_overlap: float,
     min_tissue_frac: float,
-) -> list[int]:
-    """Return overlapping x-starts whose output cores contain tissue.
+) -> list[tuple[list[int], int, int]]:
+    """Return per-tissue-run tile schedules for this row band.
 
-    Starts are calculated independently for each row band. Contiguous tissue
-    runs are expanded by the crop margin, then covered with windows whose
-    usable cores meet at their edges. This keeps the input overlap while
-    avoiding windows that only cover empty gaps between tissue runs.
+    Each element is ``(x0_list, overlap_px, optimal_y0)`` for one contiguous 
+    tissue run in ``tissue_mask[y0:y1]``. The Y-coordinate is dynamically 
+    shifted to perfectly center the tile over the tissue's true vertical bounds 
+    within the run.
     """
-    _, width = tissue_mask.shape
+    height, width = tissue_mask.shape
     if y0 >= y1 or width == 0:
         return []
+        
     if width <= tile_size:
         fraction = float(tissue_mask[y0:y1].mean())
-        return [0] if fraction >= min_tissue_frac else []
+        # For a single tile spanning the whole width, we can also vertically center it
+        row_has_tissue = tissue_mask[y0:y1].any(axis=1)
+        if row_has_tissue.any():
+            y_local_min = int(np.argmax(row_has_tissue))
+            y_local_max = int(len(row_has_tissue) - 1 - np.argmax(row_has_tissue[::-1]))
+            tissue_height = (y_local_max + 1) - y_local_min
+            optimal_y0 = (y0 + y_local_min) - max(0, (tile_size - tissue_height) // 2)
+            optimal_y0 = max(0, min(optimal_y0, height - tile_size))
+        else:
+            optimal_y0 = y0
+            
+        if _passes_tissue_threshold(fraction, min_tissue_frac):
+            return [([0], 0, optimal_y0)]
+        return []
 
     column_has_tissue = tissue_mask[y0:y1].any(axis=0)
     transitions = np.diff(np.r_[False, column_has_tissue, False].astype(np.int8))
     run_starts = np.flatnonzero(transitions == 1)
     run_ends = np.flatnonzero(transitions == -1)
-    step = tile_size - 2 * margin
+
+    step_min = max(1, round(tile_size * (1 - max_overlap)))
+    pad = step_min // 2
     last_start = width - tile_size
-    starts: set[int] = set()
 
+    runs: list[tuple[list[int], int, int]] = []
     for run_start, run_end in zip(run_starts, run_ends, strict=True):
-        start = max(0, int(run_start) - margin)
-        start = min(start, last_start)
-        while True:
-            tile_end = min(start + tile_size, width)
-            fraction = float(tissue_mask[y0:y1, start:tile_end].mean())
-            if fraction >= min_tissue_frac:
-                starts.add(start)
-            core_end = tile_end if tile_end == width else start + tile_size - margin
-            if core_end >= run_end:
-                break
-            next_start = min(start + step, last_start)
-            if next_start == start:
-                break
-            start = next_start
+        coverage_start = min(max(0, int(run_start) - pad), last_start)
+        coverage_end = min(width, int(run_end) + pad)
+        span = coverage_end - coverage_start - tile_size
 
-    return sorted(starts)
+        # 1. Find the tight Y-bounds of the tissue inside this specific horizontal run
+        run_mask = tissue_mask[y0:y1, coverage_start:coverage_end]
+        row_has_tissue = run_mask.any(axis=1)
+        
+        if not row_has_tissue.any():
+            continue  # Edge case: padding missed tissue entirely
+            
+        y_local_min = int(np.argmax(row_has_tissue))
+        y_local_max = int(len(row_has_tissue) - 1 - np.argmax(row_has_tissue[::-1]))
+        
+        true_y0 = y0 + y_local_min
+        tissue_height = (y_local_max + 1) - y_local_min
+        
+        # 2. Center the tile vertically over the tissue block and clamp to image bounds
+        optimal_y0 = true_y0 - max(0, (tile_size - tissue_height) // 2)
+        optimal_y0 = max(0, min(optimal_y0, height - tile_size))
 
+        # 3. Calculate horizontal scheduling
+        if span <= 0:
+            starts = [coverage_start]
+            overlap_px = 0
+        else:
+            step_max = max(step_min, round(tile_size * (1 - min_overlap)))
+            n_steps = max(1, math.ceil(span / step_max))
+            step = span / n_steps
+            starts = sorted(
+                {
+                    min(round(coverage_start + i * step), last_start)
+                    for i in range(n_steps + 1)
+                }
+            )
+            overlap_px = max(0, tile_size - round(step))
+
+        # 4. Filter tiles based on the NEW vertically-shifted coordinate
+        kept = [
+            x0
+            for x0 in starts
+            if _passes_tissue_threshold(
+                float(tissue_mask[
+                    optimal_y0 : min(optimal_y0 + tile_size, height), 
+                    x0 : min(x0 + tile_size, width)
+                ].mean()),
+                min_tissue_frac,
+            )
+        ]
+        
+        if kept:
+            runs.append((kept, overlap_px, optimal_y0))
+
+    return runs
+import math
+import numpy as np
+from itertools import product
+
+def _get_global_1d_schedule(
+    start: int, 
+    end: int, 
+    tile_size: int, 
+    min_overlap: float, 
+    max_overlap: float, 
+    max_bound: int
+) -> list[int]:
+    """
+    Computes a mathematically consistent 1D grid spanning exactly from `start` to `end`.
+    By locking this to the global bounds, we guarantee perfect phase alignment
+    across the entire image, preventing colliding center-crops.
+    """
+    span = end - start
+    last_start = max(0, max_bound - tile_size)
+
+    if span <= tile_size:
+        # A single tile is sufficient. Center it over the tissue span.
+        opt_start = start + (span - tile_size) // 2
+        return [max(0, min(opt_start, last_start))]
+
+    step_min = max(1, round(tile_size * (1 - max_overlap)))
+    step_max = max(step_min, round(tile_size * (1 - min_overlap)))
+
+    # Determine the distance from the first tile's left edge to the last tile's left edge
+    dist = span - tile_size
+    
+    # If the span is awkwardly sized (just over a tile width), force a minimum step
+    # to prevent a severe maximum overlap violation.
+    if dist < step_min:
+        dist = step_min
+        start = start + (span - tile_size - dist) // 2
+
+    # Calculate exact number of steps required across the valid distance
+    n_steps = max(1, math.ceil(dist / step_max))
+    step = dist / n_steps
+    
+    # Generate the strict lattice sequence
+    return [
+        max(0, min(round(start + i * step), last_start))
+        for i in range(n_steps + 1)
+    ]
+
+def get_mask_aware_tile_positions(
+    tissue_mask: np.ndarray,
+    tile_size: int,
+    min_overlap: float,
+    max_overlap: float,
+    min_tissue_frac: float,
+) -> list[tuple[int, int]]:
+    """Return globally phase-locked (x0, y0) tile coordinates for the entire image."""
+    height, width = tissue_mask.shape
+    if height == 0 or width == 0:
+        return []
+
+    # 1. Find the strict global bounding box of ALL tissue.
+    row_any = tissue_mask.any(axis=1)
+    col_any = tissue_mask.any(axis=0)
+    
+    if not row_any.any():
+        return []
+        
+    y_start, y_end = int(np.argmax(row_any)), int(height - np.argmax(row_any[::-1]))
+    x_start, x_end = int(np.argmax(col_any)), int(width - np.argmax(col_any[::-1]))
+
+    # 2. Generate a single, unified grid lattice for the entire tissue bounds.
+    y_coords = _get_global_1d_schedule(y_start, y_end, tile_size, min_overlap, max_overlap, height)
+    x_coords = _get_global_1d_schedule(x_start, x_end, tile_size, min_overlap, max_overlap, width)
+
+    # 3. Filter the Cartesian grid, dropping tiles that fall strictly on background space.
+    kept_positions = []
+    for y0, x0 in product(y_coords, x_coords):
+        tile_crop = tissue_mask[y0 : y0 + tile_size, x0 : x0 + tile_size]
+        if float(tile_crop.mean()) >= min_tissue_frac:
+            kept_positions.append((x0, y0))
+
+    return kept_positions
 
 def _compute_norm_stats(eho_hwc: np.ndarray) -> dict:
     """Pre-compute per-channel min/max from a representative EHO thumbnail.
@@ -432,6 +593,9 @@ def infer_wsi(
     mode: str = "wsi",
     tile_pad: int | None = None,
     min_tissue_frac: float = 0.05,
+    min_overlap: float = 0.25,
+    max_overlap: float = 0.5,
+    edge_thickness_px: int = 32,
     device: str = "auto",
     _model=None,
 ) -> np.ndarray:
@@ -483,6 +647,14 @@ def infer_wsi(
     :param min_tissue_frac: minimum tissue fraction required to infer a tile.
         The default ``0.05`` skips tiles with only sparse tissue. Use ``0.0``
         to infer every tile containing any tissue pixel.
+    :param min_overlap: minimum accepted overlap between adjacent tiles, as a
+        fraction of the tile size. Default ``0.25``.
+    :param max_overlap: maximum accepted overlap between adjacent tiles, as a
+        fraction of the tile size. Within this ``[min_overlap, max_overlap]``
+        band, the scheduler picks the fewest tiles needed for full coverage.
+        Default ``0.5``.
+    :param edge_thickness_px: WSI-only tissue boundary thickness to relabel
+        as edge epithelium. Set to ``0`` to disable.
     :param device: ``"auto"``, ``"cpu"``, ``"cuda"``, or ``"mps"``.
     :return: (H, W) uint8 label map at the original input resolution.
     """
@@ -604,7 +776,8 @@ def infer_wsi(
     t0 = perf_counter()
 
     tile_size = TILE_SIZE[0]
-    margin = tile_size // 8
+    if not 0 <= min_overlap <= max_overlap < 1:
+        raise ValueError("require 0 <= min_overlap <= max_overlap < 1")
     inference_engine = GaussianMaskAwareInference(
         model,
         device_obj,
@@ -614,7 +787,14 @@ def infer_wsi(
     if min_tissue_frac < 0 or min_tissue_frac > 1:
         raise ValueError("min_tissue_frac must be between 0 and 1")
 
-    y_positions = _tile_positions(H, tile_size, margin)
+    # Get the flat list of optimized 2D coordinates
+    tile_positions = get_mask_aware_tile_positions(
+        tissue_mask_full,
+        tile_size,
+        min_overlap,
+        max_overlap,
+        min_tissue_frac,
+    )
 
     inner_pred = np.zeros((H, W), dtype=bool)
     outer_pred = np.zeros((H, W), dtype=bool)
@@ -623,113 +803,70 @@ def infer_wsi(
     # Only allocate full EHO when the user wants it saved
     eho_full = np.zeros((H, W, 3), dtype=np.uint8) if save_eho else None
 
-    n_total = len(y_positions) * len(_tile_positions(W, tile_size, margin))
+    # Estimate roughly what the old grid size would have been for skipped stat reporting
+    step_est = max(1, round(tile_size * (1 - max_overlap)))
+    n_total = max(1, math.ceil(H / step_est)) * max(1, math.ceil(W / step_est))
     n_tissue = 0
-    n_skipped = 0
+    
     t_fetch = 0.0
-    t_eho = 0.0
     t_model = 0.0
     t_stitch = 0.0
-    rgb_run: np.ndarray | None = None
+    t_loop_start = perf_counter()
+    progress_every = 10
 
-    for y0 in y_positions:
+    # Fetch and process independently using the flattened coordinate list
+    for x0, y0 in tile_positions:
         y1 = min(y0 + tile_size, H)
+        x1 = min(x0 + tile_size, W)
+        tw = x1 - x0
         th = y1 - y0
-        x_positions = _mask_aware_tile_positions(
-            tissue_mask_full,
-            y0,
-            y1,
-            tile_size,
-            margin,
-            min_tissue_frac,
+
+        # ── fetch the exact RGB tile via pyvips random access ──
+        _tf = perf_counter()
+        rgb_tile = np.ascontiguousarray(
+            vips_full.crop(x0, y0, tw, th).numpy()[:, :, :3]
         )
-        tissue_fractions = [
-            tissue_mask_full[y0:y1, x0 : min(x0 + tile_size, W)].mean()
-            for x0 in x_positions
-        ]
-        tissue_flags = [
-            fraction > 0 if min_tissue_frac == 0 else fraction >= min_tissue_frac
-            for fraction in tissue_fractions
-        ]
-        run_ends: list[int | None] = [None] * len(x_positions)
-        run_end: int | None = None
-        for index in range(len(x_positions) - 1, -1, -1):
-            if tissue_flags[index]:
-                if run_end is None:
-                    run_end = min(x_positions[index] + tile_size, W)
-                run_ends[index] = run_end
-            else:
-                run_end = None
+        eho_tile = apply_eho_chunked(
+            rgb_tile.astype(np.uint8),
+            chunk_rows=th,  # whole tile at once
+            **stain_params,
+        )
+        del rgb_tile
+        t_fetch += perf_counter() - _tf
 
-        cached_run_start: int | None = None
-        cached_run_end: int | None = None
-        for index, x0 in enumerate(x_positions):
-            x1 = min(x0 + tile_size, W)
-            tw = x1 - x0
+        # ── Gaussian sliding-window inference ──
+        _te = perf_counter()
+        n_tissue += 1
+        inner_tile, outer_tile = inference_engine.predict_tile(eho_tile)
+        t_model += perf_counter() - _te
 
-            # ── skip non-tissue tiles entirely ──
-            # Zeros in hematoxylin_full are handled by the masked
-            # equalize_hist in _equalise_hematoxylin.
-            if not tissue_flags[index]:
-                n_skipped += 1
-                rgb_run = None
-                cached_run_start = None
-                cached_run_end = None
-                continue
-
-            # ── fetch RGB tile from pyvips ──
-            _tf = perf_counter()
-            if cached_run_start is None:
-                cached_run_start = x0
-                cached_run_end = run_ends[index]
-                assert cached_run_end is not None
-                rgb_run = np.ascontiguousarray(
-                    vips_full.crop(
-                        cached_run_start,
-                        y0,
-                        cached_run_end - cached_run_start,
-                        th,
-                    ).numpy()[:, :, :3]
-                )
-            assert rgb_run is not None and cached_run_start is not None
-            rgb_tile = np.ascontiguousarray(
-                rgb_run[:, x0 - cached_run_start : x1 - cached_run_start]
+        if n_tissue % progress_every == 0:
+            elapsed = perf_counter() - t_loop_start
+            rate = n_tissue / elapsed
+            log.info(
+                "Progress: %d tiles processed (%.1f tiles/s, %.0fs elapsed)",
+                n_tissue,
+                rate,
+                elapsed,
             )
 
-            # ── EHO with pre-computed stain vectors ──
-            eho_tile = apply_eho_chunked(
-                rgb_tile.astype(np.uint8),
-                chunk_rows=th,  # whole tile at once
-                **stain_params,
-            )
-            del rgb_tile
-            t_fetch += perf_counter() - _tf
-
-            # Store hematoxylin channel for post-processing
-            hematoxylin_full[y0:y1, x0:x1] = eho_tile[:, :, 1]
-            if eho_full is not None:
-                eho_full[y0:y1, x0:x1] = eho_tile
-
-            # ── Gaussian sliding-window inference ──
-            _te = perf_counter()
-            n_tissue += 1
-            inner_tile, outer_tile = inference_engine.predict_tile(eho_tile)
-            del eho_tile
-            t_model += perf_counter() - _te
-
-            # ── center-crop stitch ──
-            _ts = perf_counter()
-            vy0 = margin if y0 > 0 else 0
-            vx0 = margin if x0 > 0 else 0
-            vy1 = th - (margin if y1 < H else 0)
-            vx1 = tw - (margin if x1 < W else 0)
-
-            oy0, oy1 = y0 + vy0, y0 + vy1
-            ox0, ox1 = x0 + vx0, x0 + vx1
-
-            inner_pred[oy0:oy1, ox0:ox1] = inner_tile[vy0:vy1, vx0:vx1]
-            outer_pred[oy0:oy1, ox0:ox1] = outer_tile[vy0:vy1, vx0:vx1]
-            t_stitch += perf_counter() - _ts
+        # ── stitch via max-pooling / OR ──
+        _ts = perf_counter()
+        
+        # Store continuous hematoxylin / eho channels
+        hematoxylin_full[y0:y1, x0:x1] = eho_tile[:, :, 1]
+        if eho_full is not None:
+            eho_full[y0:y1, x0:x1] = eho_tile
+            
+        del eho_tile
+        
+        # Logical OR the boolean outputs. Since GaussianMaskAwareInference 
+        # suppresses the probabilities at tile edges before thresholding,
+        # max-pooling (logical OR) overlapping tiles is perfectly safe.
+        inner_pred[y0:y1, x0:x1] |= inner_tile
+        outer_pred[y0:y1, x0:x1] |= outer_tile
+        
+        t_stitch += perf_counter() - _ts
 
     n_skipped = max(0, n_total - n_tissue)
     timings["tiled_inference"] = perf_counter() - t0
@@ -776,6 +913,7 @@ def infer_wsi(
         mode=mode,
         profile_name=profile,
         tile_pad=tile_pad,
+        edge_thickness_px=edge_thickness_px,
         verbose=True,
     )
     del tissue_mask_full, hematoxylin_full

@@ -135,6 +135,7 @@ LABEL_MAPPING: dict[str, int] = {
     "epithelial_nuclei": 5,
     "other_nuclei": 6,
     "urethra": 7,
+    "edge_epithelium": 8,
 }
 
 # ---------------------------------------------------------------------------
@@ -1018,11 +1019,31 @@ def _dog_hematoxylin(hema: np.ndarray) -> np.ndarray:
       sigma_outer = 8 px ≈ 16 µm — smooths to local background level
 
     DoG > 0 at nucleus centres, ≈ 0 on uniform cytoplasm/stroma sheets.
+
+    For arrays > 4 M pixels the sigma_outer pass — a smooth low-frequency
+    background estimate — is computed at 1/4 linear resolution (16x fewer
+    pixels) and upsampled, matching the downsampled path used elsewhere in
+    this module. sigma_inner stays full-resolution to preserve nucleus detail.
     """
     hema_f = hema.astype(np.float32)
-    return scipy.ndimage.gaussian_filter(
-        hema_f, sigma=2.0
-    ) - scipy.ndimage.gaussian_filter(hema_f, sigma=8.0)
+    inner = scipy.ndimage.gaussian_filter(hema_f, sigma=2.0)
+
+    if hema_f.size > 4_000_000:
+        scale = 4
+        h, w = hema_f.shape
+        small = np.ascontiguousarray(hema_f[::scale, ::scale])
+        del hema_f  # free the full-res buffer before allocating the upsampled one
+        scipy.ndimage.gaussian_filter(small, sigma=8.0 / scale, output=small)
+        outer = np.repeat(np.repeat(small, scale, axis=0)[:h], scale, axis=1)[:, :w]
+        del small
+        inner -= outer
+        del outer
+    else:
+        scipy.ndimage.gaussian_filter(hema_f, sigma=8.0, output=hema_f)
+        inner -= hema_f
+        del hema_f
+
+    return inner
 
 
 def segment_nuclei(
@@ -1165,6 +1186,70 @@ def assign_labels(masks: MaskSet, shape: tuple[int, int]) -> np.ndarray:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  Stage 10b – Edge epithelium (WSI mode only)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _relabel_edge_epithelium(
+    labeled: np.ndarray,
+    tissue: np.ndarray,
+    edge_thickness_px: int,
+    majority_threshold: float = 0.5,
+) -> None:
+    """Reclassify whole epithelium components that mostly sit on the tissue edge.
+
+    Judges each connected inner/epithelium component as a whole, rather than
+    per-pixel: a component with >= *majority_threshold* of its area inside
+    the eroded-tissue edge band becomes entirely ``edge_epithelium``; a
+    component that is mostly interior stays entirely ``inner``. This avoids
+    splitting a single gland into part-inner/part-edge. Mutates *labeled*
+    in place.
+    """
+    inner_b = labeled == LABEL_MAPPING["inner"]
+    bbox = _roi_bounding_box(inner_b)
+    if bbox is None:
+        return
+
+    # In-place NOT + AND avoids two extra full-size boolean temporaries.
+    edge_band = scipy.ndimage.binary_erosion(
+        tissue, iterations=edge_thickness_px, border_value=0
+    )
+    np.logical_not(edge_band, out=edge_band)
+    np.logical_and(edge_band, tissue, out=edge_band)
+
+    inner_crop = inner_b[bbox]
+    edge_crop = edge_band[bbox]
+    del edge_band, inner_b
+
+    labeled_crop = np.empty(inner_crop.shape, dtype=np.int32)
+    n: int = int(scipy.ndimage.label(inner_crop, output=labeled_crop))
+    del inner_crop
+    if n == 0:
+        del labeled_crop, edge_crop
+        return
+
+    flat = labeled_crop.ravel()
+    total_sizes = np.bincount(flat, minlength=n + 1)
+    edge_sizes = np.bincount(flat[edge_crop.ravel()], minlength=n + 1)
+    del edge_crop, flat
+
+    edge_fraction = np.zeros(n + 1, dtype=np.float32)
+    np.divide(edge_sizes, total_sizes, out=edge_fraction, where=total_sizes > 0)
+    del edge_sizes, total_sizes
+
+    is_edge_component = edge_fraction >= majority_threshold
+    is_edge_component[0] = False  # background label of the component labelling
+    del edge_fraction
+
+    edge_component_mask = is_edge_component[labeled_crop]
+    del labeled_crop, is_edge_component
+
+    labeled_view = labeled[bbox]
+    labeled_view[edge_component_mask] = LABEL_MAPPING["edge_epithelium"]
+    del edge_component_mask, labeled_view
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Main pipeline
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1180,6 +1265,7 @@ def post_process(
     nuclei_threshold: float = 0.01,
     inner_border_px: int = 2,
     tile_pad: int | None = None,
+    edge_thickness_px: int = 32,
     verbose: bool = True,
     return_timings: bool = False,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, float]]:
@@ -1347,6 +1433,15 @@ def post_process(
         filled_tissue=filled_tissue,
     )
     labeled = _run("assign_labels", assign_labels, mask_set, inner.shape)
+
+    if mode == "wsi" and edge_thickness_px > 0 and tissue is not None:
+        _run(
+            "edge_epithelium",
+            _relabel_edge_epithelium,
+            labeled,
+            tissue,
+            edge_thickness_px,
+        )
 
     # Free heavyweight masks immediately; only the labelled map is needed.
     del inner, outer, tissue, filled_tissue, urethra, epi_nuclei, other_nuclei, mask_set

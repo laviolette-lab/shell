@@ -78,6 +78,18 @@ def main() -> int:
         default=None,
         help="Minimum tissue fraction for mask-aware inference tiles.",
     )
+    parser.add_argument(
+        "--min-overlap",
+        type=float,
+        default=None,
+        help="Minimum accepted overlap between adjacent tiles, as a fraction of tile size.",
+    )
+    parser.add_argument(
+        "--max-overlap",
+        type=float,
+        default=None,
+        help="Maximum accepted overlap between adjacent tiles, as a fraction of tile size.",
+    )
     parser.add_argument("--model-path", type=str, default=None, help="Explicit model weights path.")
     parser.add_argument("--model-version", type=str, default=None, help="Bundled model version tag.")
     parser.add_argument(
@@ -120,6 +132,10 @@ def main() -> int:
         kwargs["target_mpp"] = args.target_mpp
     if args.min_tissue_frac is not None:
         kwargs["min_tissue_frac"] = args.min_tissue_frac
+    if args.min_overlap is not None:
+        kwargs["min_overlap"] = args.min_overlap
+    if args.max_overlap is not None:
+        kwargs["max_overlap"] = args.max_overlap
 
     if args.skip_model:
         # infer_wsi resolves "auto" internally, but the dummy model still

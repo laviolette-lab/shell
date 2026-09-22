@@ -181,10 +181,35 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     infer_p.add_argument(
+        "--min-overlap",
+        type=float,
+        default=0.25,
+        help=(
+            "Minimum accepted overlap between adjacent tiles, as a fraction "
+            "of tile size. Default 0.25."
+        ),
+    )
+    infer_p.add_argument(
+        "--max-overlap",
+        type=float,
+        default=0.5,
+        help=(
+            "Maximum accepted overlap between adjacent tiles, as a fraction of "
+            "tile size. The scheduler picks the fewest tiles within "
+            "[--min-overlap, --max-overlap]. Default 0.5."
+        ),
+    )
+    infer_p.add_argument(
         "--device",
         type=str,
         default="auto",
         help="Device to use (auto, cpu, cuda, mps).",
+    )
+    infer_p.add_argument(
+        "--edge-thickness-px",
+        type=int,
+        default=32,
+        help="WSI-only tissue-edge thickness relabelled as edge epithelium.",
     )
 
     # ── infer-omero ───────────────────────────────────────────────────
@@ -374,6 +399,9 @@ def main(argv: list[str] | None = None) -> int:
             mode=args.mode,
             tile_pad=args.tile_pad,
             min_tissue_frac=args.min_tissue_frac,
+            min_overlap=args.min_overlap,
+            max_overlap=args.max_overlap,
+            edge_thickness_px=args.edge_thickness_px,
             device=args.device,
         )
 

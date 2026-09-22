@@ -39,25 +39,12 @@ def test_cli_help(capsys):
     assert main(["--version"]) is None or True  # argparse exits
 
 
-def test_eval_forward_skips_vae_loss_in_eval_mode():
-    """Eval-time forward should not compute the VAE loss branch."""
-    from shell import model as shell_model
+def test_runtime_model_requires_onnx():
+    """Runtime inference rejects repository-only PTH checkpoints."""
+    from shell.model import build_model
 
-    class DummyModel:
-        training = False
-
-        def encode(self, x):
-            return "encoded", ["down"]
-
-        def decode(self, x_enc, down_x):
-            assert x_enc == "encoded"
-            assert down_x == ["down"]
-            return "decoded"
-
-        def _get_vae_loss(self, x, x_enc):
-            raise AssertionError("VAE loss should not be computed during eval mode")
-
-    assert shell_model._eval_segresnetvae_forward(DummyModel(), "input") == "decoded"
+    with pytest.raises(ValueError, match="requires an ONNX model"):
+        build_model("checkpoint.pth")
 
 
 def test_autocast_device_respects_target_device():
@@ -79,13 +66,49 @@ def test_mask_aware_tile_positions_shift_per_row():
     tissue_mask[:64, 180:220] = True
     tissue_mask[64:, 300:340] = True
 
-    top = _mask_aware_tile_positions(tissue_mask, 0, 64, 128, 16, 0.01)
-    bottom = _mask_aware_tile_positions(tissue_mask, 64, 128, 128, 16, 0.01)
+    top = _mask_aware_tile_positions(tissue_mask, 0, 64, 128, 0.25, 0.5, 0.01)
+    bottom = _mask_aware_tile_positions(tissue_mask, 64, 128, 128, 0.25, 0.5, 0.01)
 
     assert top != bottom
-    assert top == [164]
-    assert bottom == [284]
-    assert _mask_aware_tile_positions(tissue_mask, 0, 0, 128, 16, 0.01) == []
+    assert [x0 for x0s, _ in top for x0 in x0s] == [148]
+    assert [x0 for x0s, _ in bottom for x0 in x0s] == [268]
+    assert _mask_aware_tile_positions(tissue_mask, 0, 0, 128, 0.25, 0.5, 0.01) == []
+
+
+def test_mask_aware_tile_positions_schedules_disjoint_runs_independently():
+    """Disjoint tissue islands in one row get separate schedules, not one wide grid."""
+    import numpy as np
+
+    from shell.infer_wsi import _mask_aware_tile_positions
+
+    tissue_mask = np.zeros((64, 2000), dtype=bool)
+    tissue_mask[:, 0:100] = True
+    tissue_mask[:, 1800:1900] = True
+
+    runs = _mask_aware_tile_positions(tissue_mask, 0, 64, 256, 0.25, 0.5, 0.01)
+
+    assert len(runs) == 2
+
+
+def test_tile_positions_minimizes_tiles_within_overlap_band():
+    """Fewest evenly-spaced tiles are chosen when the overlap band allows it."""
+    from shell.infer_wsi import _tile_positions
+
+    starts, overlap_px = _tile_positions(6656, 2048, min_overlap=0.25, max_overlap=0.5)
+
+    assert starts == [0, 1536, 3072, 4608]
+    assert overlap_px == 512  # exactly at the min_overlap floor (1 - 1536/2048)
+
+
+def test_tile_positions_never_drops_below_min_overlap():
+    """Tile-count minimization never violates the overlap floor, even when the
+    exact span forces overlap above the requested ceiling."""
+    from shell.infer_wsi import _tile_positions
+
+    starts, overlap_px = _tile_positions(3000, 2048, min_overlap=0.25, max_overlap=0.5)
+
+    assert len(starts) == 2
+    assert overlap_px >= 512  # 512px == 0.25 * 2048 == min_overlap floor
 
 
 def test_gaussian_mask_aware_inference_returns_tile_masks():
@@ -111,6 +134,14 @@ def test_gaussian_mask_aware_inference_returns_tile_masks():
     assert outer.shape == (128, 128)
     assert not inner.any()
     assert not outer.any()
+
+
+def test_runtime_inference_rejects_pth_checkpoint():
+    """PTH files remain export inputs, never runtime inference models."""
+    from shell.model import build_model
+
+    with pytest.raises(ValueError, match="requires an ONNX model"):
+        build_model("checkpoint.pth")
 
 
 def test_onnx_wrapper_rejects_non_exported_spatial_shape():

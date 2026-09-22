@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 
-from shell.model import LATEST_MODEL, MODEL_INPUT_SIZE, _resolve_bundled_weights
+from shell.model import LATEST_MODEL, MODEL_INPUT_SIZE
 
 
 def _build_model_for_export(device: torch.device) -> torch.nn.Module:
@@ -42,7 +42,13 @@ def export_onnx(
     if checkpoint is None:
         if version is None:
             version = LATEST_MODEL
-        checkpoint = str(_resolve_bundled_weights(version))
+        checkpoint = str(
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "shell"
+            / "weights"
+            / f"model_{version}.pth"
+        )
 
     dev = torch.device(device)
     model = _build_model_for_export(dev)

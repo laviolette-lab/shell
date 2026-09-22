@@ -193,7 +193,9 @@ def run_inference(
         if tuple(img_t.shape[-2:]) == tuple(roi_size) and not (pad_h or pad_w):
             # Provider tiles already match the model ROI. Avoid MONAI's
             # accumulator and importance-map setup for this single window.
-            logits = model(img_t.to(device_obj))
+            # sliding_window_inference's own `device="cpu"` output arg keeps
+            # the other branch CPU-safe; this direct call needs the same.
+            logits = model(img_t.to(device_obj)).cpu()
         else:
             blend_mode = "gaussian" if overlap > 0 else "constant"
             logits = sliding_window_inference(
