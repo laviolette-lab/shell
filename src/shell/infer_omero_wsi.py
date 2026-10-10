@@ -35,6 +35,7 @@ import logging
 import os
 import queue
 import threading
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -100,6 +101,16 @@ def _ensure_omero() -> None:
         PIXEL_TYPES.clear()
         _OMERO_BG_CLASS = None
         _OMERO_LOADED = False
+
+
+def _get_pyvips() -> ModuleType:
+    """Import pyvips after configuring its process-wide thread limit."""
+    from shell.model import _detect_cpu_budget
+
+    os.environ.setdefault("VIPS_CONCURRENCY", str(_detect_cpu_budget()))
+    import pyvips
+
+    return pyvips
 
 
 def _require_omero() -> None:
@@ -1250,9 +1261,7 @@ def _save_results(
     because both libraries try to own the process's OpenMP / thread-pool
     runtime.
     """
-    import pyvips  # must come after torch is loaded — see note above
-
-    pyvips.concurrency_set(12)
+    pyvips = _get_pyvips()
 
     if save_eho and eho_canvas is not None:
         os.makedirs(os.path.dirname(save_eho) or ".", exist_ok=True)
@@ -1667,9 +1676,7 @@ def infer_omero_wsi(
                 pass
             pred = np.zeros((out_h, out_w), dtype=np.uint8)
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-            import pyvips
-
-            pyvips.concurrency_set(12)
+            pyvips = _get_pyvips()
             pyvips.Image.new_from_array(pred).write_to_file(output_path)
             logger.info("Saved prediction to %s", output_path)
             return pred

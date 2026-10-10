@@ -45,12 +45,10 @@ from shell.transforms import (
 )
 
 # pyvips intentionally after torch-loading shell imports above (macOS safety)
+# Bound libvips to the cgroup-aware CPU budget without overriding an explicit
+# user configuration. This must happen before pyvips initializes libvips.
+os.environ.setdefault("VIPS_CONCURRENCY", str(_detect_cpu_budget()))
 import pyvips  # isort: skip
-
-# Bounded to the real (cgroup-aware) CPU budget: a fixed guess like 12 can
-# already oversubscribe a quota-limited container, and stacking it on top of
-# ONNX Runtime's own thread pool during real inference makes it much worse.
-pyvips.concurrency_set(_detect_cpu_budget())
 
 log = logging.getLogger(__name__)
 
