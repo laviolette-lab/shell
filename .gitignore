@@ -76,6 +76,7 @@ dmypy.json
 *.png
 *.csv
 *.json
+!.zenodo.json
 *.jp2
 *.prof
 

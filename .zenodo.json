@@ -1,0 +1,27 @@
+{
+  "title": "SHELL — SHELL Highlights Epithelium and Lumen Locations",
+  "upload_type": "software",
+  "description": "A whole-slide image segmentation pipeline for H&E-stained histopathology. SHELL uses Macenko color deconvolution and a SegResNetVAE to segment epithelium and lumen/stroma regions.",
+  "creators": [
+    {
+      "name": "Michael Barrett",
+      "email": "mjbarrett@mcw.edu"
+    }
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "keywords": [
+    "histopathology",
+    "segmentation",
+    "whole-slide image",
+    "H&E",
+    "deep learning"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "https://github.com/laviolette-lab/shell",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ]
+}
