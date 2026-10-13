@@ -24,6 +24,7 @@ import logging
 import math
 import os
 import warnings
+from itertools import product
 from types import ModuleType
 from typing import cast
 
@@ -270,8 +271,6 @@ def _tile_positions(
     overlap_px = tile_size - round(step)
     return starts, overlap_px
 
-import math
-import numpy as np
 
 def _mask_aware_tile_positions(
     tissue_mask: np.ndarray,
@@ -284,15 +283,15 @@ def _mask_aware_tile_positions(
 ) -> list[tuple[list[int], int, int]]:
     """Return per-tissue-run tile schedules for this row band.
 
-    Each element is ``(x0_list, overlap_px, optimal_y0)`` for one contiguous 
-    tissue run in ``tissue_mask[y0:y1]``. The Y-coordinate is dynamically 
-    shifted to perfectly center the tile over the tissue's true vertical bounds 
+    Each element is ``(x0_list, overlap_px, optimal_y0)`` for one contiguous
+    tissue run in ``tissue_mask[y0:y1]``. The Y-coordinate is dynamically
+    shifted to perfectly center the tile over the tissue's true vertical bounds
     within the run.
     """
     height, width = tissue_mask.shape
     if y0 >= y1 or width == 0:
         return []
-        
+
     if width <= tile_size:
         fraction = float(tissue_mask[y0:y1].mean())
         # For a single tile spanning the whole width, we can also vertically center it
@@ -305,7 +304,7 @@ def _mask_aware_tile_positions(
             optimal_y0 = max(0, min(optimal_y0, height - tile_size))
         else:
             optimal_y0 = y0
-            
+
         if _passes_tissue_threshold(fraction, min_tissue_frac):
             return [([0], 0, optimal_y0)]
         return []
@@ -328,16 +327,16 @@ def _mask_aware_tile_positions(
         # 1. Find the tight Y-bounds of the tissue inside this specific horizontal run
         run_mask = tissue_mask[y0:y1, coverage_start:coverage_end]
         row_has_tissue = run_mask.any(axis=1)
-        
+
         if not row_has_tissue.any():
             continue  # Edge case: padding missed tissue entirely
-            
+
         y_local_min = int(np.argmax(row_has_tissue))
         y_local_max = int(len(row_has_tissue) - 1 - np.argmax(row_has_tissue[::-1]))
-        
+
         true_y0 = y0 + y_local_min
         tissue_height = (y_local_max + 1) - y_local_min
-        
+
         # 2. Center the tile vertically over the tissue block and clamp to image bounds
         optimal_y0 = true_y0 - max(0, (tile_size - tissue_height) // 2)
         optimal_y0 = max(0, min(optimal_y0, height - tile_size))
@@ -363,29 +362,29 @@ def _mask_aware_tile_positions(
             x0
             for x0 in starts
             if _passes_tissue_threshold(
-                float(tissue_mask[
-                    optimal_y0 : min(optimal_y0 + tile_size, height), 
-                    x0 : min(x0 + tile_size, width)
-                ].mean()),
+                float(
+                    tissue_mask[
+                        optimal_y0 : min(optimal_y0 + tile_size, height),
+                        x0 : min(x0 + tile_size, width),
+                    ].mean()
+                ),
                 min_tissue_frac,
             )
         ]
-        
+
         if kept:
             runs.append((kept, overlap_px, optimal_y0))
 
     return runs
-import math
-import numpy as np
-from itertools import product
+
 
 def _get_global_1d_schedule(
-    start: int, 
-    end: int, 
-    tile_size: int, 
-    min_overlap: float, 
-    max_overlap: float, 
-    max_bound: int
+    start: int,
+    end: int,
+    tile_size: int,
+    min_overlap: float,
+    max_overlap: float,
+    max_bound: int,
 ) -> list[int]:
     """
     Computes a mathematically consistent 1D grid spanning exactly from `start` to `end`.
@@ -405,7 +404,7 @@ def _get_global_1d_schedule(
 
     # Determine the distance from the first tile's left edge to the last tile's left edge
     dist = span - tile_size
-    
+
     # If the span is awkwardly sized (just over a tile width), force a minimum step
     # to prevent a severe maximum overlap violation.
     if dist < step_min:
@@ -415,12 +414,12 @@ def _get_global_1d_schedule(
     # Calculate exact number of steps required across the valid distance
     n_steps = max(1, math.ceil(dist / step_max))
     step = dist / n_steps
-    
+
     # Generate the strict lattice sequence
     return [
-        max(0, min(round(start + i * step), last_start))
-        for i in range(n_steps + 1)
+        max(0, min(round(start + i * step), last_start)) for i in range(n_steps + 1)
     ]
+
 
 def get_mask_aware_tile_positions(
     tissue_mask: np.ndarray,
@@ -437,16 +436,20 @@ def get_mask_aware_tile_positions(
     # 1. Find the strict global bounding box of ALL tissue.
     row_any = tissue_mask.any(axis=1)
     col_any = tissue_mask.any(axis=0)
-    
+
     if not row_any.any():
         return []
-        
+
     y_start, y_end = int(np.argmax(row_any)), int(height - np.argmax(row_any[::-1]))
     x_start, x_end = int(np.argmax(col_any)), int(width - np.argmax(col_any[::-1]))
 
     # 2. Generate a single, unified grid lattice for the entire tissue bounds.
-    y_coords = _get_global_1d_schedule(y_start, y_end, tile_size, min_overlap, max_overlap, height)
-    x_coords = _get_global_1d_schedule(x_start, x_end, tile_size, min_overlap, max_overlap, width)
+    y_coords = _get_global_1d_schedule(
+        y_start, y_end, tile_size, min_overlap, max_overlap, height
+    )
+    x_coords = _get_global_1d_schedule(
+        x_start, x_end, tile_size, min_overlap, max_overlap, width
+    )
 
     # 3. Filter the Cartesian grid, dropping tiles that fall strictly on background space.
     kept_positions = []
@@ -456,6 +459,7 @@ def get_mask_aware_tile_positions(
             kept_positions.append((x0, y0))
 
     return kept_positions
+
 
 def _compute_norm_stats(eho_hwc: np.ndarray) -> dict:
     """Pre-compute per-channel min/max from a representative EHO thumbnail.
@@ -805,7 +809,7 @@ def infer_wsi(
     step_est = max(1, round(tile_size * (1 - max_overlap)))
     n_total = max(1, math.ceil(H / step_est)) * max(1, math.ceil(W / step_est))
     n_tissue = 0
-    
+
     t_fetch = 0.0
     t_model = 0.0
     t_stitch = 0.0
@@ -850,20 +854,20 @@ def infer_wsi(
 
         # ── stitch via max-pooling / OR ──
         _ts = perf_counter()
-        
+
         # Store continuous hematoxylin / eho channels
         hematoxylin_full[y0:y1, x0:x1] = eho_tile[:, :, 1]
         if eho_full is not None:
             eho_full[y0:y1, x0:x1] = eho_tile
-            
+
         del eho_tile
-        
-        # Logical OR the boolean outputs. Since GaussianMaskAwareInference 
+
+        # Logical OR the boolean outputs. Since GaussianMaskAwareInference
         # suppresses the probabilities at tile edges before thresholding,
         # max-pooling (logical OR) overlapping tiles is perfectly safe.
         inner_pred[y0:y1, x0:x1] |= inner_tile
         outer_pred[y0:y1, x0:x1] |= outer_tile
-        
+
         t_stitch += perf_counter() - _ts
 
     n_skipped = max(0, n_total - n_tissue)

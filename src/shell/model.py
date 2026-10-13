@@ -56,6 +56,7 @@ def _detect_cpu_budget() -> int:
 
     return max(1, available)
 
+
 # ---------------------------------------------------------------------------
 # Default hyper-parameters (keep in sync with train.ipynb)
 # ---------------------------------------------------------------------------

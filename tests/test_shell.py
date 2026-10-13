@@ -119,9 +119,7 @@ def test_gaussian_mask_aware_inference_returns_tile_masks():
 
     class DummyModel:
         def __call__(self, image):
-            return torch.zeros(
-                image.shape[0], 3, image.shape[2], image.shape[3]
-            )
+            return torch.zeros(image.shape[0], 3, image.shape[2], image.shape[3])
 
     engine = GaussianMaskAwareInference(
         DummyModel(),
