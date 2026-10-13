@@ -70,8 +70,8 @@ def test_mask_aware_tile_positions_shift_per_row():
     bottom = _mask_aware_tile_positions(tissue_mask, 64, 128, 128, 0.25, 0.5, 0.01)
 
     assert top != bottom
-    assert [x0 for x0s, _ in top for x0 in x0s] == [148]
-    assert [x0 for x0s, _ in bottom for x0 in x0s] == [268]
+    assert [x0 for x0s, _, _ in top for x0 in x0s] == [148]
+    assert [x0 for x0s, _, _ in bottom for x0 in x0s] == [268]
     assert _mask_aware_tile_positions(tissue_mask, 0, 0, 128, 0.25, 0.5, 0.01) == []
 
 
