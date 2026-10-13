@@ -5,6 +5,7 @@
 [![Lint](https://github.com/laviolette-lab/shell/actions/workflows/lint.yml/badge.svg)](https://github.com/laviolette-lab/shell/actions/workflows/lint.yml)
 [![PyPI - Version](https://img.shields.io/pypi/v/lavlab-shell.svg)](https://pypi.org/project/lavlab-shell)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/lavlab-shell.svg)](https://pypi.org/project/lavlab-shell)
+[![DOI](https://zenodo.org/badge/1165675183.svg)](https://doi.org/10.5281/zenodo.23344054)
 
 -----
 
